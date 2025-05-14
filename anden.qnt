@@ -6,8 +6,6 @@ module anden {
   import basicSpells.* from "./basicSpells"
 
 
-// Alpenglow
-
   type Slot = int
 
   type Block = {
