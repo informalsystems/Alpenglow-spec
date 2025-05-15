@@ -89,9 +89,18 @@ pure def initialize_process (id: ProcessID): LocalState =
 //
 
 
-const processes: Set[ProcessID]
-val sixty = processes.size() * 60 / 100
-val eighty = processes.size() * 80 / 100
+const correct: Set[ProcessID] // set of correct processes (non Byzantine)
+const byzantine: Set[ProcessID] // set of Byzantine processes
+
+const blocks: Set[Block] // set of blocks
+
+// Assumption 1
+assume correct.size() > byzantine.size() * 4 // N > 5F
+
+// Assumption 2 on additional crashes: TODO
+
+val sixty = correct.union(byzantine).size() * 60 / 100
+val eighty = correct.union(byzantine).size() * 80 / 100
 
 type NetWorkMsg = {
   sender: ProcessID,
@@ -100,6 +109,7 @@ type NetWorkMsg = {
 
 type Environment = {
   system: ProcessID -> LocalState,
+  now: Slot, // we can push to different views of slots later
   msgBuffer: Set[NetWorkMsg],
   activeTimeouts: ProcessID -> Set[TimeoutEventData], 
 }
@@ -118,22 +128,23 @@ var s: Environment
 // This specification is event triggered, so a process step can only be triggered by a message or a timeout
 // as a result we need either messages or timeouts in the initial state
 pure def initial_global_state: Environment =
-  { system: processes.mapBy(v => initialize_process(v)),
+  { system: correct.mapBy(v => initialize_process(v)),
+    slot: 0,
     msgBuffer: Set(),
-    activeTimeouts: processes.mapBy(v => Set()),
+    activeTimeouts: correct.mapBy(v => Set()),
   }
 
 
 // CSMI-TODO
 /// Interface consensus algorithm / state machine: how consensus algorithm effects the environment 
 pure def apply_effect (env: Environment, v: ProcessID, res: Result): Environment =
-  val new = { ... env, system: env.system.set(v, res.state) } // update the state of the process
+  val new = { ... env, system: env.system.set(v, res.post) } // update the state of the process
   res.output.fold(new, (s, o) => 
     match o {
       | Broadcast(msg) => 
         val nm = { sender: v, msg: msg }
         { ... s, msgBuffer: s.msgBuffer.union(Set(nm))} // add the message to the buffer
-      | ScheduleEventTimeoutCO(slot) =>
+      | ScheduleEventTimeout(slot) =>
         { ... s, activeTimeouts: s.activeTimeouts.set(v, s.activeTimeouts.get(v).union(Set(slot))) } // add the timeout to the buffer
     })
 
@@ -156,10 +167,8 @@ action init = all {
 
 
 action receive_block(v: ProcessID): bool = all{
-  nondet slot = 1.to(10).oneOf()
-  nondet hash = 1.to(10).oneOf()
-  nondet parent = 1.to(10).oneOf()
-  val result = consensus(s.system.get(v), BlockCI({slot: slot, hash: hash, parent: parent}))
+  nondet block = blocks..filter(b => b.slot == s.now).oneOf()
+  val result = consensus(s.system.get(v), BlockCI(block))
   s' = apply_effect(s, v, result)
 }
 
@@ -170,28 +179,70 @@ action fire_timeout_event(v: ProcessID): bool = all{
     s' = apply_effect(s2, v, result)
 }
 
-
-
-action BlockNotarizedAction(v: ProcessID): bool = all {
-  pure def block_notarized(slot: Slot, hash: Blockhash, msgBuffer: Set[NetWorkMsg]): bool = 
-    val voted_for = msgBuffer.filter(m => m.msg ==  NotarVoteMsg({slot: slot, hash: hash}))
-    voted_for.size() >= sixty 
-  nondet notarized = s.msgBuffer
-                        .fold(Set(), (s, x) => match x.msg {
+pure def NotarizedBlocks (msgs: Set[NetWorkMsg]): Set[{slot: Slot, hash: Blockhash}]= 
+  pure def block_notarized(slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool = 
+    msgs.filter(m => m.msg ==  NotarVoteMsg({slot: slot, hash: hash}))
+        .size() >= sixty 
+  msgs.fold(Set(), (s, x) => match x.msg {
                           | NotarVoteMsg(m) => s.union(Set(m))
                           | _ => s
                         })
-                        .filter(t => block_notarized(t.slot, t.hash, s.msgBuffer))
-                        .oneOf()
+              .filter(t => block_notarized(t.slot, t.hash, msgs))
+
+pure def NotarFallBackBlocks (msgs: Set[NetWorkMsg]): Set[{slot: Slot, hash: Blockhash}]= 
+  pure def block_notarized(slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool = 
+    msgs.filter(m =>  m.msg ==  NotarVoteMsg({slot: slot, hash: hash}) or 
+                      m.msg ==  NotarFallBackVoteMsg({slot: slot, hash: hash}) )
+        .size() >= sixty 
+  msgs.fold(Set(), (s, x) => match x.msg {
+                          | NotarVoteMsg(m) => s.union(Set(m))
+                          | NotarFallBackVoteMsg(m) => s.union(Set(m))
+                          | _ => s
+                        })
+              .filter(t => block_notarized(t.slot, t.hash, msgs))
+
+pure def SlotSkipCertified (msgs: Set[NetWorkMsg]): Set[Slot]= 
+  pure def slot_skip_certified(slot: Slot, msgs: Set[NetWorkMsg]): bool = 
+      msgs.filter(m => m.msg == SkipVoteMsg(slot))
+          .size() >= sixty 
+  msgs.fold(Set(), (s, x) => match x.msg {
+                          | SkipVoteMsg(m) => s.union(Set(m))
+                          | _ => s
+                        })
+              .filter(t => slot_skip_certified(t, msgs))
+
+/// Definition 16
+// Warning "notarization or notar-fallback": notar-fallback seems to imply notar
+// Warning: Previous block? Block for previous slot
+pure def ParentReadyP (s: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool = all {
+  first_slot_in_leader_window(s),
+  val nbset = NotarizedBlocks(msgs).filter(t => t.hash == hash)
+  // TODO notarfallback missing
+  all {
+    nbset.size() > 0, // there is at least one notarized block
+    nbset.getOnlyElement().slot.to(s).subseteq(SlotSkipCertified(msgs))
+    // all intermediate slots are skip certified
+  }
+
+}
+
+action BlockNotarizedAction(v: ProcessID): bool = all {
+  nondet notarized = NotarizedBlocks(s.msgBuffer).oneOf()
   s' = apply_effect(s, v, consensus(s.system.get(v), BlockNotarizedCI(notarized)))
 }
 
+action ParentReadyAction(v: ProcessID): bool = all {
+  nondet b = blocks.filter(b=> ParentReadyP(now, b.hash, s.msgBuffer)).oneOf()
+  s' = apply_effect(s, v, consensus(s.system.get(v), ParentReadyCI({slot: now, hash: b.hash})))
+}
+
 action step = 
-  nondet v = oneOf(processes)
+  nondet v = oneOf(correct)
   any {
     receive_block(v),
     fire_timeout_event(v),
     BlockNotarizedAction(v),
+    s' = { ... s, now: s.now + 1 }, // increment the slot
   }
 
 

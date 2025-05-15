@@ -60,7 +60,7 @@ module anden {
 
   type Result = {
     output: Set[ConsensusOutput],
-    res_ls: LocalState,
+    post: LocalState,
   }
 
 
@@ -90,12 +90,12 @@ module anden {
       Set(slot - 3, slot - 2, slot - 1, slot)
 
   pure def SetTimeouts(ls: LocalState, slot: Slot): Result =
-    { res_ls: ls,
+    { post: ls,
       output: WindowSlots(slot).map(i => (ScheduleEventTimeout(i))) } 
 
   pure def TryNotar(ls: LocalState, b: Block): { result: Result, success: bool } =
     if (ls.get(b.slot).state.contains(Voted))
-      { result: { res_ls: ls, output: Set() }, success: false }
+      { result: { post: ls, output: Set() }, success: false }
     else 
       val firstSlot = first_slot_in_leader_window(b.slot) 
       if (any { // Warning: parentheses not matching in paper
@@ -105,9 +105,9 @@ module anden {
         val s2 = ls.put(b.slot, {  state: ls.get(b.slot).state.union(Set(Voted, VotedNotar(b.hash))) ,
                                    pendingBlock: None })
         val tf = TryFinal(s2, b.slot, b.hash)
-        { result: { res_ls: tf.res_ls, output: out.union(tf.output) }, success: true }
+        { result: { post: tf.post, output: out.union(tf.output) }, success: true }
       else
-        { result: { res_ls: ls, output: Set() }, success: false }
+        { result: { post: ls, output: Set() }, success: false }
 
   pure def TryFinal(ls: LocalState, slot: Slot, hash: Blockhash): Result =
     if (and{
@@ -116,30 +116,30 @@ module anden {
       not(ls.get(slot).state.contains(BadWindow)),
     })
       { output: Set(Broadcast(FinalVoteMsg(slot))), 
-        res_ls: add_objects(ls, slot, Set(ItsOver)) }
+        post: add_objects(ls, slot, Set(ItsOver)) }
     else
-      { output: Set(), res_ls: ls } 
+      { output: Set(), post: ls } 
 
 
 
 
   pure def TrySkipWindow(ls: LocalState, slot: Slot): Result =
-    WindowSlots(slot).fold({ output: Set(), res_ls: ls } , (s, k) =>
-      if (not(s.res_ls.get(k).state.contains(Voted)))
+    WindowSlots(slot).fold({ output: Set(), post: ls } , (s, k) =>
+      if (not(s.post.get(k).state.contains(Voted)))
         val update = Set(Broadcast(SkipVoteMsg(k)))
-        val s2 = s.res_ls.add_objects(k, Set(Voted, BadWindow))
+        val s2 = s.post.add_objects(k, Set(Voted, BadWindow))
                         .set_pending_block(k, None)
-        { output: update, res_ls: s2 }
+        { output: update, post: s2 }
       else
         s
     )
     
   pure def CheckPendingBlocks(ls: LocalState): Result =
-    ls.values().fold({ output: Set(), res_ls: ls }, (res, s) =>
+    ls.values().fold({ output: Set(), post: ls }, (res, s) =>
       match s.pendingBlock {
         | Some(b) =>
-          val tn = TryNotar(res.res_ls, b)
-          { output: res.output.union(tn.result.output), res_ls: tn.result.res_ls } // TODO implement
+          val tn = TryNotar(res.post, b)
+          { output: res.output.union(tn.result.output), post: tn.result.post } // TODO implement
         | None =>
           res
       }
@@ -154,19 +154,19 @@ module anden {
       | BlockCI(b) =>
         val tn = TryNotar(ls, b) // looks like a function but has two side effects: changes state and broadcasts
         if (tn.success)
-          val cpb = CheckPendingBlocks(tn.result.res_ls)
-          { res_ls: cpb.res_ls, output: cpb.output.union(tn.result.output) }
-        else if (not(tn.result.res_ls.get(b.slot).state.contains(Voted)))
-            val s = tn.result.res_ls.put(b.slot, { ... tn.result.res_ls.get(b.slot), pendingBlock: Some(b) })
-            { output: tn.result.output, res_ls: s }
+          val cpb = CheckPendingBlocks(tn.result.post)
+          { post: cpb.post, output: cpb.output.union(tn.result.output) }
+        else if (not(tn.result.post.get(b.slot).state.contains(Voted)))
+            val s = tn.result.post.put(b.slot, { ... tn.result.post.get(b.slot), pendingBlock: Some(b) })
+            { output: tn.result.output, post: s }
         else
-          { output: tn.result.output, res_ls: tn.result.res_ls } // Warning: The state might have changed
+          { output: tn.result.output, post: tn.result.post } // Warning: The state might have changed
 
       | TimeOutCI(slot) =>
         if (ls.get(slot).state.contains(Voted))
           TrySkipWindow(ls, slot)
         else
-          { output: Set(), res_ls: ls }
+          { output: Set(), post: ls }
 
       | BlockNotarizedCI(sh) =>
         val s = add_objects(ls, sh.slot, Set(BlockNotarized(sh.hash)))
@@ -175,22 +175,22 @@ module anden {
       | ParentReadyCI(sh) =>
         val s = add_objects(ls, sh.slot, Set(ParentReady(sh.hash)))
         val s1 = CheckPendingBlocks(s)
-        val s2 = SetTimeouts(s1.res_ls, sh.slot)
-        { output: s1.output.union(s2.output), res_ls: s2.res_ls }
+        val s2 = SetTimeouts(s1.post, sh.slot)
+        { output: s1.output.union(s2.output), post: s2.post }
 
       | SafeToNotarCI(sh) =>
         val s = TrySkipWindow(ls, sh.slot)
-        if (not(s.res_ls.get(sh.slot).state.contains(ItsOver)))
+        if (not(s.post.get(sh.slot).state.contains(ItsOver)))
           val output = s.output.union(Set(Broadcast(NotarFallBackVoteMsg(sh))))
-          { output: output, res_ls: add_objects(s.res_ls, sh.slot, Set(BadWindow)) }
+          { output: output, post: add_objects(s.post, sh.slot, Set(BadWindow)) }
         else
           s
 
       | SafeToSkipCI(slot) =>
         val s = TrySkipWindow(ls, slot)
-        if (not(s.res_ls.get(slot).state.contains(ItsOver)))
+        if (not(s.post.get(slot).state.contains(ItsOver)))
           val output = s.output.union(Set(Broadcast(SkipVoteMsg(slot))))
-          { output: output, res_ls: add_objects(s.res_ls, slot, Set(BadWindow)) }
+          { output: output, post: add_objects(s.post, slot, Set(BadWindow)) }
         else
           s
     }
