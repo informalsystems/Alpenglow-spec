@@ -50,6 +50,15 @@ module anden {
     | SkipFallbackVoteMsg(Slot)
     | FinalVoteMsg(Slot)
 
+  pure def slot_of(msg: Message): Slot =
+    match msg {
+      | NotarVoteMsg(m) => m.slot
+      | NotarFallBackVoteMsg(m) => m.slot
+      | SkipVoteMsg(slot) => slot
+      | SkipFallbackVoteMsg(slot) => slot
+      | FinalVoteMsg(slot) => slot
+    }
+
   type TimeoutEventData = Slot // TODO not sure what timeouts they start
 
   type ConsensusOutput =

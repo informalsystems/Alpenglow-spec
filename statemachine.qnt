@@ -95,10 +95,12 @@ const byzantine: Set[ProcessID] // set of Byzantine processes
 const blocks: Set[Block] // set of blocks
 
 // Assumption 1
-assume correct.size() > byzantine.size() * 4 // N > 5F
+assume resilience_condition = correct.size() > byzantine.size() * 4 // N > 5F
 
 // Assumption 2 on additional crashes: TODO
 
+val twenty = correct.union(byzantine).size() * 20 / 100
+val forty = correct.union(byzantine).size() * 40 / 100
 val sixty = correct.union(byzantine).size() * 60 / 100
 val eighty = correct.union(byzantine).size() * 80 / 100
 
@@ -129,7 +131,7 @@ var s: Environment
 // as a result we need either messages or timeouts in the initial state
 pure def initial_global_state: Environment =
   { system: correct.mapBy(v => initialize_process(v)),
-    slot: 0,
+    now: 0,
     msgBuffer: Set(),
     activeTimeouts: correct.mapBy(v => Set()),
   }
@@ -167,7 +169,7 @@ action init = all {
 
 
 action receive_block(v: ProcessID): bool = all{
-  nondet block = blocks..filter(b => b.slot == s.now).oneOf()
+  nondet block = blocks.filter(b => b.slot == s.now).oneOf()
   val result = consensus(s.system.get(v), BlockCI(block))
   s' = apply_effect(s, v, result)
 }
@@ -226,15 +228,91 @@ pure def ParentReadyP (s: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool = 
 
 }
 
+// BlockNotarized
 action BlockNotarizedAction(v: ProcessID): bool = all {
   nondet notarized = NotarizedBlocks(s.msgBuffer).oneOf()
   s' = apply_effect(s, v, consensus(s.system.get(v), BlockNotarizedCI(notarized)))
 }
 
+
+// ParentReady
 action ParentReadyAction(v: ProcessID): bool = all {
-  nondet b = blocks.filter(b=> ParentReadyP(now, b.hash, s.msgBuffer)).oneOf()
-  s' = apply_effect(s, v, consensus(s.system.get(v), ParentReadyCI({slot: now, hash: b.hash})))
+  nondet b = blocks.filter(b=> ParentReadyP(s.now, b.hash, s.msgBuffer)).oneOf()
+  s' = apply_effect(s, v, consensus(s.system.get(v), ParentReadyCI({slot: s.now, hash: b.hash})))
 }
+
+pure def voted_to_skip (s: Slot, msgs: Set[NetWorkMsg]): Set[ProcessID] = 
+  msgs.filter(m => match m.msg {
+    | SkipVoteMsg(slot) => slot == s
+    | _ => false}).map(m => m.sender)
+      
+pure def voted_to_notar_pair (slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): Set[ProcessID] = 
+  msgs.filter(m => match m.msg {
+    | NotarVoteMsg(x) => x.slot == slot and x.hash == hash
+    | _ => false}).map(m => m.sender)
+
+// Warning: vote doesn't contain parent. Assumption about parent hashed in hash?
+pure def voted_to_notar (b: Block, msgs: Set[NetWorkMsg]): Set[ProcessID] = 
+  voted_to_notar_pair(b.slot, b.hash, msgs)
+
+
+
+
+// SafeToNotar
+action SafeToNotarAction(v: ProcessID): bool = all {
+  // Definition 17: The event is only issued if the node voted in slot s already, but not to notarize b.
+  s.msgBuffer .filter(m => m.sender == v and s.now == m.msg.slot_of())
+              .filter(m => match m.msg {
+                        | NotarVoteMsg(m) => false
+                        | _ => true
+              })
+              .size() > 0,
+  nondet b = blocks.filter(b => b.slot == s.now).oneOf() 
+  all {
+    or {
+      voted_to_notar(b, s.msgBuffer).size() >= forty,
+      and {
+        voted_to_skip(s.now, s.msgBuffer).union(voted_to_notar(b, s.msgBuffer)).size() >= sixty,
+        voted_to_notar(b, s.msgBuffer).size() >= twenty,
+      }
+    },
+     s' = apply_effect(s, v, consensus(s.system.get(v), SafeToNotarCI({slot: b.slot, hash: b.hash}))),
+  }
+
+}
+
+// SafetToSkip
+action SafeToSkipAction(v: ProcessID): bool = all {
+    // Definition 17: The event is only issued if the node voted in slot s already, but not to skip b.
+  s.msgBuffer .filter(m => m.sender == v and s.now == m.msg.slot_of())
+              .filter(m => match m.msg {
+                        | SkipVoteMsg(s) => false
+                        | _ => true
+                        })
+              .size() > 0,
+  val blocks_with_notar_votes = 
+    s.msgBuffer.filter(m => slot_of(m.msg) == s.now)
+      .map(m => m.msg)
+      .fold(Set(), (s, m) => match m {
+        | NotarVoteMsg(n) => s.union(Set(n))
+        | _ => s
+      }
+    )
+  val max_notar = blocks_with_notar_votes.fold({slot: -1, hash: -1}, (res, x) => 
+    if (voted_to_notar_pair(x.slot, x.hash, s.msgBuffer).size() > voted_to_notar_pair(res.slot, res.hash, s.msgBuffer).size())
+      x
+    else
+      res)
+  val sum_notar = blocks_with_notar_votes.map(m => m.hash).fold(Set(), (res, x) => 
+    res.union(voted_to_notar_pair(s.now, x, s.msgBuffer)))
+  voted_to_skip(s.now, s.msgBuffer).union(sum_notar).size() - 
+  voted_to_notar_pair(max_notar.slot, max_notar.hash, s.msgBuffer).size() >= forty,
+  s' = apply_effect(s, v, consensus(s.system.get(v), SafeToSkipCI(s.now))),
+}
+
+
+
+
 
 action step = 
   nondet v = oneOf(correct)
