@@ -3,6 +3,8 @@
 module consensus {
 
   import anden.* from "./anden"
+
+  import basicSpells.* from "./basicSpells"
 //
 // Consensus / State machine interface CSMI
 // functional side
@@ -14,7 +16,7 @@ module consensus {
 //
 
 // CSMI-TODO
-type ProcessID
+type ProcessID = str
 
 // CSMI-TODO
 // type LocalState = Slot -> SlotState
@@ -47,7 +49,12 @@ type TimeoutEvent
 // CSMI-TODO 
 // This initializes process that is identified by ProcessID
 pure def initialize_process (id: ProcessID): LocalState =
-  { Map() } // CSMI-TODO: add more here
+   0.to(4).mapBy(x => 
+    if (x == 0)
+      { state: Set(ParentReady(-1)), pendingBlock: None }
+    else
+      empty_slot_state)  
+    
 
 
 
@@ -175,6 +182,7 @@ action receive_block(v: ProcessID): bool = all{
 }
 
 action fire_timeout_event(v: ProcessID): bool = all{
+    s.activeTimeouts.get(v) != Set(),
     nondet timeout = oneOf(s.activeTimeouts.get(v))
     val s2 = { ... s, activeTimeouts: s.activeTimeouts.set(v, s.activeTimeouts.get(v).exclude(Set(timeout))) }
     val result = consensus(s2.system.get(v), TimeOutCI(timeout))
@@ -230,6 +238,7 @@ pure def ParentReadyP (s: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool = 
 
 // BlockNotarized
 action BlockNotarizedAction(v: ProcessID): bool = all {
+  NotarizedBlocks(s.msgBuffer).size() > 0,
   nondet notarized = NotarizedBlocks(s.msgBuffer).oneOf()
   s' = apply_effect(s, v, consensus(s.system.get(v), BlockNotarizedCI(notarized)))
 }
@@ -237,7 +246,8 @@ action BlockNotarizedAction(v: ProcessID): bool = all {
 
 // ParentReady
 action ParentReadyAction(v: ProcessID): bool = all {
-  nondet b = blocks.filter(b=> ParentReadyP(s.now, b.hash, s.msgBuffer)).oneOf()
+  blocks.filter(b => ParentReadyP(s.now, b.hash, s.msgBuffer)).size() > 0,
+  nondet b = blocks.filter(b => ParentReadyP(s.now, b.hash, s.msgBuffer)).oneOf()
   s' = apply_effect(s, v, consensus(s.system.get(v), ParentReadyCI({slot: s.now, hash: b.hash})))
 }
 
@@ -318,9 +328,12 @@ action step =
   nondet v = oneOf(correct)
   any {
     receive_block(v),
-    fire_timeout_event(v),
+ //   fire_timeout_event(v),
     BlockNotarizedAction(v),
-    s' = { ... s, now: s.now + 1 }, // increment the slot
+    ParentReadyAction(v),
+    SafeToNotarAction(v),
+    SafeToSkipAction(v),
+   // s' = { ... s, now: s.now + 1 }, // increment the slot
   }
 
 
@@ -414,3 +427,14 @@ action step =
 
 
 
+module example {
+  import consensus(
+    blocks = Set( {slot: 0, hash: 0, parent: -1}, 
+                  {slot: 1, hash: 1, parent: 0}, 
+                  {slot: 2, hash: 2, parent: 1}, 
+                  {slot: 3, hash: 3, parent: 2}),
+    correct = Set("v1", "v2", "v3", "v4"),
+    byzantine = Set(),
+  ).* 
+  
+}

@@ -21,6 +21,9 @@ module anden {
     state: Set[SlotObject],
   }
 
+  pure val empty_slot_state =
+    { pendingBlock: None, state: Set() }
+
   /// Definition 20 (Votor State)
   type SlotObject =
     | ParentReady(Blockhash)
