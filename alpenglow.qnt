@@ -9,9 +9,7 @@
  */
 
 module alpenglow {
-
   import basicSpells.* from "./basicSpells"
-
 
   type Slot = int
 
@@ -47,8 +45,6 @@ module alpenglow {
     | ParentReadyCI({slot: Slot, hash: Blockhash})
     | SafeToNotarCI({slot: Slot, hash: Blockhash})
     | SafeToSkipCI(Slot)
-
-// Consensus State Machine Interface (CSMI) definitions
 
   type LocalState = Slot -> SlotState
 
@@ -86,10 +82,10 @@ module alpenglow {
   // Auxiliary functions
 
   pure def add_objects(ls: LocalState, slot: Slot, obj: Set[SlotObject]): LocalState =
-    ls.put(slot, { ... ls.get(slot), state: ls.get(slot).state.union(obj) })
+    ls.setBy(slot, s => { ...s, state: s.state.union(obj) })
 
   pure def set_pending_block(ls: LocalState, slot: Slot, b: Option[Block]): LocalState =
-    ls.put(slot, { ... ls.get(slot), pendingBlock: b })
+    ls.setBy(slot, s => { ...s, pendingBlock: b })
 
   /// line 10 of TryNotar. TODO: Is there more to it?
   pure def first_slot_in_leader_window(slot: Slot): bool =
@@ -112,24 +108,33 @@ module alpenglow {
     { post: ls,
       output: WindowSlots(slot).map(i => (ScheduleEventTimeout(i))) } 
 
+  /// Check if a notarization vote can be cast
   pure def TryNotar(ls: LocalState, b: Block): { result: Result, success: bool } =
     if (ls.get(b.slot).state.contains(Voted))
       { result: { post: ls, output: Set() }, success: false }
     else 
       val firstSlot = first_slot_in_leader_window(b.slot) 
-      if (any { // Warning: parentheses not matching in paper
-        firstSlot and ls.get(b.slot).state.contains(ParentReady(b.parent)),
-        not(firstSlot) and ls.get(b.slot - 1).state.contains(VotedNotar(b.parent))})
-        val out = Set(Broadcast(NotarVoteMsg({slot:b.slot, hash: b.hash})))
-        val s2 = ls.put(b.slot, {  state: ls.get(b.slot).state.union(Set(Voted, VotedNotar(b.hash))) ,
-                                   pendingBlock: None })
+      if ((firstSlot and ParentReady(b.parent).in(ls.get(b.slot).state))
+        or (not(firstSlot) and VotedNotar(b.parent).in(ls.get(b.slot - 1).state)))
+        // Warning: parentheses not matching in paper
+
+        // Notarization vote
+        val out = Set(Broadcast(NotarVoteMsg({ slot:b.slot, hash: b.hash })))
+        val s2 = ls.setBy(b.slot, s => {
+          state: s.state.union(Set(Voted, VotedNotar(b.hash))),
+          // Won't vote notar a second time
+          pendingBlock: None
+        })
+
+        // Maybe vote finalize as well
         val tf = TryFinal(s2, b.slot, b.hash)
+
         { result: { post: tf.post, output: out.union(tf.output) }, success: true }
       else
         { result: { post: ls, output: Set() }, success: false }
 
   pure def TryFinal(ls: LocalState, slot: Slot, hash: Blockhash): Result =
-    if (and{
+    if (and {
       ls.get(slot).state.contains(BlockNotarized(hash)),
       ls.get(slot).state.contains(VotedNotar(hash)),
       not(ls.get(slot).state.contains(BadWindow)),
@@ -138,8 +143,6 @@ module alpenglow {
         post: add_objects(ls, slot, Set(ItsOver)) }
     else
       { output: Set(), post: ls } 
-
-
 
 
   pure def TrySkipWindow(ls: LocalState, slot: Slot): Result =
@@ -165,9 +168,9 @@ module alpenglow {
     )
 
 
-// Algorithm 1
+  // Algorithm 1
 
-// Warning: Block vs. Blockevent a bit unclear
+  // Warning: Block vs. Blockevent a bit unclear
   pure def consensus(ls: LocalState, ci: ConsensusInput): Result =
     match ci {
       | BlockCI(b) =>
