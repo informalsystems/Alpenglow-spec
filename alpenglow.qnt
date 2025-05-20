@@ -208,7 +208,7 @@ module alpenglow {
       | SafeToSkipCI(slot) =>
         val s = TrySkipWindow(ls, slot)
         if (not(s.post.get(slot).state.contains(ItsOver)))
-          val output = s.output.union(Set(Broadcast(SkipVoteMsg(slot))))
+          val output = s.output.union(Set(Broadcast(SkipFallbackVoteMsg(slot))))
           { output: output, post: add_objects(s.post, slot, Set(BadWindow)) }
         else
           s

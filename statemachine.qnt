@@ -211,12 +211,22 @@ pure def fast_finalized(slot: Slot, msgs: Set[NetWorkMsg]): Set[Blockhash] =
     .filter(t =>  fast_finalization_certified(t.slot, t.hash, msgs))
     .map(t => t.hash)
 
+//
+//
+// Invariants and Witnesses
+//
+//
+
 def agreement = 
   0.to(s.now).forall(slot => finalized(slot, s.msgBuffer).size() <= 1) 
 
 def fast_agreement = 
   0.to(s.now).forall(slot => fast_finalized(slot, s.msgBuffer).union(finalized(slot, s.msgBuffer)).size() <= 1)
 
+// Witness was used to find bug in safeToNotar encoding
+def nobad =
+  correct.forall(v => 
+  not(s.system.get(v).get(1).state.contains(BadWindow)))
 
 // TODO finalize ancestors
 
@@ -264,17 +274,21 @@ pure def SlotSkipCertified (msgs: Set[NetWorkMsg]): Set[Slot]=
 /// Definition 16
 // Warning "notarization or notar-fallback": notar-fallback seems to imply notar
 // Warning: Previous block? Block for previous slot
-pure def ParentReadyP (s: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool = all {
-  first_slot_in_leader_window(s),
-  val nbset = NotarizedBlocks(msgs).filter(t => t.hash == hash)
-  // TODO notarfallback missing
-  all {
-    nbset.size() > 0, // there is at least one notarized block
-    nbset.getOnlyElement().slot.to(s).subseteq(SlotSkipCertified(msgs))
-    // all intermediate slots are skip certified
-  }
-
+pure def parent_ready (slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool = all {
+  first_slot_in_leader_window(slot),
+  val pool = NotarizedBlocks(msgs).filter(t => t.hash == hash and t.slot == slot)
+  pool.exists(b => 
+    and {
+      b.slot < slot, // previous block
+      or {
+        notarization_certified(b.slot, b.hash, msgs),  
+        notar_fallback_certified(b.slot, b.hash, msgs)
+      },
+      b.slot.to(slot).subseteq(SlotSkipCertified(msgs))
+  })
 }
+
+
 
 // BlockNotarized
 action BlockNotarizedAction(v: ProcessID): bool = all {
@@ -286,8 +300,8 @@ action BlockNotarizedAction(v: ProcessID): bool = all {
 
 // ParentReady
 action ParentReadyAction(v: ProcessID): bool = all {
-  blocks.filter(b => ParentReadyP(s.now, b.hash, s.msgBuffer)).size() > 0,
-  nondet b = blocks.filter(b => ParentReadyP(s.now, b.hash, s.msgBuffer)).oneOf()
+  blocks.filter(b => parent_ready(s.now, b.hash, s.msgBuffer)).size() > 0,
+  nondet b = blocks.filter(b => parent_ready(s.now, b.hash, s.msgBuffer)).oneOf()
   s' = apply_effect(s, v, consensus(s.system.get(v), ParentReadyCI({slot: s.now, hash: b.hash})))
 }
 
@@ -311,12 +325,15 @@ pure def voted_to_notar (b: Block, msgs: Set[NetWorkMsg]): Set[ProcessID] =
 // SafeToNotar
 action SafeToNotarAction(v: ProcessID): bool = all {
   // Definition 17: The event is only issued if the node voted in slot s already, but not to notarize b.
-  s.msgBuffer .filter(m => m.sender == v and s.now == m.msg.slot_of())
-              .filter(m => match m.msg {
-                        | NotarVoteMsg(m) => false
-                        | _ => true
+  val voted = s.msgBuffer.filter(m => m.sender == v and s.now == m.msg.slot_of())
+  val notar_voted = voted.filter(m => match m.msg {
+                        | NotarVoteMsg(m) => true
+                        | _ => false
               })
-              .size() > 0,
+  all {
+  voted.size() > 0,
+  notar_voted.size() == 0,              
+  },            
   nondet b = blocks.filter(b => b.slot == s.now).oneOf() 
   all {
     or {
@@ -362,7 +379,8 @@ action SafeToSkipAction(v: ProcessID): bool = all {
 
 
 
-
+action tick = 
+  s' = { ... s, now: s.now + 1 }
 
 action step = 
   nondet v = oneOf(correct)
@@ -373,7 +391,7 @@ action step =
     ParentReadyAction(v),
     SafeToNotarAction(v),
     SafeToSkipAction(v),
-   // s' = { ... s, now: s.now + 1 }, // increment the slot
+   // tick, // increment the slot
   }
 
 
