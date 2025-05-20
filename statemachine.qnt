@@ -29,7 +29,7 @@ module consensus {
   const byz_blocks: Set[Block]
 
   /// Set of all blocks
-  val all_blocks = correct_blocks.union(byz_blocks)
+  pure val all_blocks = correct_blocks.union(byz_blocks)
 
   /// Slots for which this model considers votes
   const alive_slots: Set[Slot]
@@ -66,6 +66,21 @@ module consensus {
   pure val byz_network_msgs = tuples(byzantine, byz_messages).map(((sender, msg)) =>
     { sender: sender, msg: msg }
   )
+
+  // Definition 5 (ancestor and descendant). An ancestor of a block b is any
+  // block that can be reached from b by the parent links, i.e., b, b’s parent,
+  // b’s parent’s parent, and so on. If b′ is an ancestor of b, b is a
+  // descendant of b′ . Note that b is its own ancestor and descendant.
+  pure def is_descendant(a: Block, b: Block): bool =
+    // TODO: this can have better performance if we can make assumptions about slots
+    all_blocks.fold(Set(b.hash), (s, x) =>
+      all_blocks.fold(s, (s, x) =>
+        if (s.exists(hash => x.parent == hash))
+          s.union(Set(x.parent))
+        else
+          s
+      )
+    ).contains(a.hash)
 
   type Environment = {
     system: ProcessID -> LocalState,
@@ -332,19 +347,30 @@ module consensus {
   //
   //
 
-  def agreement =
+  val agreement =
     0.to(s.now).forall(slot => finalized(slot, s.msgBuffer).size() <= 1)
 
-  def fast_agreement =
+  val fast_agreement =
     0.to(s.now).forall(slot => fast_finalized(slot, s.msgBuffer).union(finalized(slot, s.msgBuffer)).size() <= 1)
 
   // Witness was used to find bug in safeToNotar encoding
-  def nobad =
+  val nobad =
     correct.forall(v =>
     not(s.system.get(v).state[1].contains(BadWindow)))
 
-  def never_fast_finalized =
+  val never_fast_finalized =
     all_blocks.forall(b => not(fast_finalization_certified(b.slot, b.hash, s.msgBuffer)))
+
+  val slots = 0.to(s.now)
+
+  /// Theorem 1 (safety). If any correct node finalizes a block b in slot s and any
+  /// correct node finalizes any block b′ in any slot s′ ≥ s, b′ is a descendant of b.
+  val safety = tuples(slots, all_blocks).forall(((slot, block)) => {
+    val finalized_at_slot = finalized(slot, s.msgBuffer)
+    block.hash.in(finalized_at_slot) implies tuples(slot.to(s.now), all_blocks).forall(((slot2, block2)) => {
+      block2.hash.in(finalized(slot2, s.msgBuffer)) implies block2.is_descendant(block)
+    })
+  })
 
   // TODO finalize ancestors
 }
