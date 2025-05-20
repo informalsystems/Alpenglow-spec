@@ -52,19 +52,20 @@ module consensus {
   }
 
   /// All votes that can be sent by the Byzantine processes (without senders)
-  val byz_messages = tuples(alive_slots, alive_hashes).map(x =>
-    Set( NotarVoteMsg({slot: x._1, hash: x._2}),
-         NotarFallBackVoteMsg({slot: x._1, hash: x._2}),
-         SkipVoteMsg(x._1),
-         SkipFallbackVoteMsg(x._1),
-         FinalVoteMsg(x._1)
-    )).flatten()
-
-  /// All votes that can be sent by the Byzantine processes
-  val byz_network_msgs = tuples(byzantine, byz_messages).map(x =>
-    Set({ sender: x._1, msg: x._2 })
+  pure val byz_messages = tuples(alive_slots, alive_hashes).map(((slot, hash)) =>
+    Set(
+      NotarVoteMsg({ slot: slot, hash: hash }),
+      NotarFallBackVoteMsg({ slot: slot, hash: hash }),
+      SkipVoteMsg(slot),
+      SkipFallbackVoteMsg(slot),
+      FinalVoteMsg(slot)
+    )
   ).flatten()
 
+  /// All votes that can be sent by the Byzantine processes
+  pure val byz_network_msgs = tuples(byzantine, byz_messages).map(((sender, msg)) =>
+    { sender: sender, msg: msg }
+  )
 
   type Environment = {
     system: ProcessID -> LocalState,
