@@ -2,8 +2,7 @@
 
 module anden {
 
-
-  import basicSpells.* from "./basicSpells"
+c
 
 
   type Slot = int
