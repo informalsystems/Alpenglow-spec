@@ -2,7 +2,8 @@
 
 module consensus {
 
-  import anden.* from "./anden"
+  import alpenglow.* from "./alpenglow"
+  
 
   import basicSpells.* from "./basicSpells"
 //

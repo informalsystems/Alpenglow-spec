@@ -1,8 +1,16 @@
 // -*- mode: Bluespec; -*-
+/**
+ * Specification of Alpenglow Consensus [1]
+ *
+ * [1]: https://drive.google.com/file/d/1y_7ddr8oNOknTQYHzXeeMD2ProQ0WjMs/view
+ *
+ * Josef Widder,
+ * Informal Systems, 2025
+ */
 
-module anden {
+module alpenglow {
 
-c
+  import basicSpells.* from "./basicSpells"
 
 
   type Slot = int
@@ -23,7 +31,7 @@ c
   pure val empty_slot_state =
     { pendingBlock: None, state: Set() }
 
-  /// Definition 20 (Votor State)
+  /// Definition 18 (Votor State)
   type SlotObject =
     | ParentReady(Blockhash)
     | Voted
@@ -44,7 +52,7 @@ c
 
   type LocalState = Slot -> SlotState
 
-  /// Table 3
+  /// Table 4 (Alpenglow’s voting messages)
   type Message =
     | NotarVoteMsg({slot: Slot, hash: Blockhash})
     | NotarFallBackVoteMsg({slot: Slot, hash: Blockhash})
