@@ -296,10 +296,25 @@ pure def SlotSkipCertified (msgs: Set[NetWorkMsg]): Set[Slot]=
                         })
               .filter(t => skip_certified(t, msgs))
 
+
+
+def NotarizedBlocksCondition(v: ProcessID, now: Slot, b: {slot: Slot, hash: Blockhash}): bool = 
+  NotarizedBlocks(s.msgBuffer).contains(b)
+
+// BlockNotarized
+action BlockNotarizedAction(v: ProcessID, now: Slot): bool = 
+  val bs = all_blocks .filter(b => NotarizedBlocksCondition(v, now, { slot: b.slot, hash: b.hash }))
+  all {
+    bs.size() > 0,
+    nondet b = bs.oneOf()
+    s' = apply_effect(s, v, consensus(s.system.get(v), BlockNotarizedCI({slot: b.slot, hash: b.hash})))
+  }
+
+
 /// Definition 16
 // Warning "notarization or notar-fallback": notar-fallback seems to imply notar
 // Warning: Previous block? Block for previous slot
-pure def parent_ready (slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool = all {
+pure def ParentReadyCondition (slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool = all {
   first_slot_in_leader_window(slot),
   val pool = NotarizedBlocks(msgs).filter(t => t.hash == hash and t.slot == slot)
   pool.exists(b => 
@@ -313,22 +328,15 @@ pure def parent_ready (slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool
   })
 }
 
-
-
-// BlockNotarized
-action BlockNotarizedAction(v: ProcessID, now: Slot): bool = all {
-  NotarizedBlocks(s.msgBuffer).size() > 0,
-  nondet notarized = NotarizedBlocks(s.msgBuffer).oneOf()
-  s' = apply_effect(s, v, consensus(s.system.get(v), BlockNotarizedCI(notarized)))
-}
-
-
 // ParentReady
-action ParentReadyAction(v: ProcessID, now: Slot): bool = all {
-  all_blocks.filter(b => parent_ready(now, b.hash, s.msgBuffer)).size() > 0,
-  nondet b = all_blocks.filter(b => parent_ready(now, b.hash, s.msgBuffer)).oneOf()
-  s' = apply_effect(s, v, consensus(s.system.get(v), ParentReadyCI({slot: now, hash: b.hash})))
-}
+action ParentReadyAction(v: ProcessID, now: Slot): bool = 
+  val bs = all_blocks.filter(b => ParentReadyCondition(now, b.hash, s.msgBuffer))
+  all {
+    bs.size() > 0,
+    nondet b = bs.oneOf()
+    s' = apply_effect(s, v, consensus(s.system.get(v), ParentReadyCI({slot: now, hash: b.hash})))
+  }
+
 
 pure def voted_to_skip (s: Slot, msgs: Set[NetWorkMsg]): Set[ProcessID] = 
   msgs.filter(m => match m.msg {
@@ -346,9 +354,7 @@ pure def voted_to_notar (b: Block, msgs: Set[NetWorkMsg]): Set[ProcessID] =
 
 
 
-
-// SafeToNotar
-action SafeToNotarAction(v: ProcessID, now: Slot): bool = all {
+def SafeToNotarCondition(v: ProcessID, now: Slot, b: Block): bool = all {
   // Definition 17: The event is only issued if the node voted in slot s already, but not to notarize b.
   val voted = s.msgBuffer.filter(m => m.sender == v and now == m.msg.slot_of())
   val notar_voted = voted.filter(m => match m.msg {
@@ -356,10 +362,10 @@ action SafeToNotarAction(v: ProcessID, now: Slot): bool = all {
                         | _ => false
               })
   all {
-  voted.size() > 0,
-  notar_voted.size() == 0,              
+    voted.size() > 0,
+    notar_voted.size() == 0,              
   },            
-  nondet b = all_blocks.filter(b => b.slot == now).oneOf() 
+  all_blocks.filter(b => b.slot == now).contains(b),
   all {
     or {
       voted_to_notar(b, s.msgBuffer).size() >= forty,
@@ -367,14 +373,21 @@ action SafeToNotarAction(v: ProcessID, now: Slot): bool = all {
         voted_to_skip(now, s.msgBuffer).union(voted_to_notar(b, s.msgBuffer)).size() >= sixty,
         voted_to_notar(b, s.msgBuffer).size() >= twenty,
       }
-    },
-     s' = apply_effect(s, v, consensus(s.system.get(v), SafeToNotarCI({slot: b.slot, hash: b.hash}))),
+    }
   }
-
 }
 
-// SafetToSkip
-action SafeToSkipAction(v: ProcessID, now: Slot): bool = all {
+// SafeToNotar
+action SafeToNotarAction(v: ProcessID, now: Slot): bool = 
+  val bs = all_blocks.filter(b => SafeToNotarCondition(v, now, b))
+  all {
+    bs.size() > 0,
+    nondet b = bs.oneOf() 
+    s' = apply_effect(s, v, consensus(s.system.get(v), SafeToNotarCI({slot: b.slot, hash: b.hash})))
+  }
+
+
+def SafeToSkipCondition(v: ProcessID, now: Slot): bool = all {
     // Definition 17: The event is only issued if the node voted in slot s already, but not to skip b.
   s.msgBuffer .filter(m => m.sender == v and now == m.msg.slot_of())
               .filter(m => match m.msg {
@@ -398,7 +411,12 @@ action SafeToSkipAction(v: ProcessID, now: Slot): bool = all {
   val sum_notar = blocks_with_notar_votes.map(m => m.hash).fold(Set(), (res, x) => 
     res.union(voted_to_notar_pair(now, x, s.msgBuffer)))
   voted_to_skip(now, s.msgBuffer).union(sum_notar).size() - 
-  voted_to_notar_pair(max_notar.slot, max_notar.hash, s.msgBuffer).size() >= forty,
+  voted_to_notar_pair(max_notar.slot, max_notar.hash, s.msgBuffer).size() >= forty
+}
+
+// SafetToSkip
+action SafeToSkipAction(v: ProcessID, now: Slot): bool = all {
+  SafeToSkipCondition(v, now),
   s' = apply_effect(s, v, consensus(s.system.get(v), SafeToSkipCI(now))),
 }
 
