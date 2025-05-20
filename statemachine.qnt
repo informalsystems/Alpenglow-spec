@@ -3,7 +3,7 @@
 module consensus {
 
   import alpenglow.* from "./alpenglow"
-  
+
 
   import basicSpells.* from "./basicSpells"
 //
@@ -171,6 +171,55 @@ pure def apply_effect (env: Environment, v: ProcessID, res: Result): Environment
 // General state machine
 //
 
+// Certificates
+
+pure def fast_finalization_certified(slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool = 
+  msgs.filter(m => m.msg ==  NotarVoteMsg({slot: slot, hash: hash}))
+      .size() >= eighty 
+
+pure def notarization_certified(slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool = 
+  msgs.filter(m => m.msg ==  NotarVoteMsg({slot: slot, hash: hash}))
+      .size() >= sixty 
+
+pure def notar_fallback_certified(slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool = 
+  msgs.filter(m =>  m.msg ==  NotarVoteMsg({slot: slot, hash: hash}) or 
+                    m.msg ==  NotarFallBackVoteMsg({slot: slot, hash: hash}) )
+        .size() >= sixty 
+
+pure def skip_certified(slot: Slot, msgs: Set[NetWorkMsg]): bool = 
+  msgs.filter(m =>  m.msg ==  SkipVoteMsg(slot) or
+                    m.msg ==  SkipFallbackVoteMsg(slot) )
+      .size() >= sixty 
+
+pure def finalization_certified(slot: Slot, msgs: Set[NetWorkMsg]): bool = 
+  msgs.filter(m =>  m.msg ==  FinalVoteMsg(slot))
+      .size() >= sixty 
+
+
+/// Definition 15
+/// Warning definitions uses "unique" perhaps unclear in case of more faults
+pure def finalized(slot: Slot, msgs: Set[NetWorkMsg]): Set[Blockhash] =
+  NotarizedBlocks(msgs)
+    .filter(t => t.slot == slot)
+    .filter(t =>  finalization_certified(t.slot, msgs) and
+                  notarization_certified(t.slot, t.hash, msgs))
+    .map(t => t.hash)
+
+pure def fast_finalized(slot: Slot, msgs: Set[NetWorkMsg]): Set[Blockhash] =
+  NotarizedBlocks(msgs)
+    .filter(t => t.slot == slot)
+    .filter(t =>  fast_finalization_certified(t.slot, t.hash, msgs))
+    .map(t => t.hash)
+
+def agreement = 
+  0.to(s.now).forall(slot => finalized(slot, s.msgBuffer).size() <= 1) 
+
+def fast_agreement = 
+  0.to(s.now).forall(slot => fast_finalized(slot, s.msgBuffer).union(finalized(slot, s.msgBuffer)).size() <= 1)
+
+
+// TODO finalize ancestors
+
 action init = all {
   s' = initial_global_state
 }
@@ -184,43 +233,33 @@ action receive_block(v: ProcessID): bool = all{
 
 action fire_timeout_event(v: ProcessID): bool = all{
     s.activeTimeouts.get(v) != Set(),
-    nondet timeout = oneOf(s.activeTimeouts.get(v))
+    nondet timeout = oneOf(s.activeTimeouts.get(v).filter(t => t == s.now))
     val s2 = { ... s, activeTimeouts: s.activeTimeouts.set(v, s.activeTimeouts.get(v).exclude(Set(timeout))) }
     val result = consensus(s2.system.get(v), TimeOutCI(timeout))
     s' = apply_effect(s2, v, result)
 }
 
 pure def NotarizedBlocks (msgs: Set[NetWorkMsg]): Set[{slot: Slot, hash: Blockhash}]= 
-  pure def block_notarized(slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool = 
-    msgs.filter(m => m.msg ==  NotarVoteMsg({slot: slot, hash: hash}))
-        .size() >= sixty 
   msgs.fold(Set(), (s, x) => match x.msg {
                           | NotarVoteMsg(m) => s.union(Set(m))
                           | _ => s
                         })
-              .filter(t => block_notarized(t.slot, t.hash, msgs))
+              .filter(t => notarization_certified(t.slot, t.hash, msgs))
 
 pure def NotarFallBackBlocks (msgs: Set[NetWorkMsg]): Set[{slot: Slot, hash: Blockhash}]= 
-  pure def block_notarized(slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool = 
-    msgs.filter(m =>  m.msg ==  NotarVoteMsg({slot: slot, hash: hash}) or 
-                      m.msg ==  NotarFallBackVoteMsg({slot: slot, hash: hash}) )
-        .size() >= sixty 
   msgs.fold(Set(), (s, x) => match x.msg {
                           | NotarVoteMsg(m) => s.union(Set(m))
                           | NotarFallBackVoteMsg(m) => s.union(Set(m))
                           | _ => s
                         })
-              .filter(t => block_notarized(t.slot, t.hash, msgs))
+              .filter(t => notar_fallback_certified(t.slot, t.hash, msgs))
 
 pure def SlotSkipCertified (msgs: Set[NetWorkMsg]): Set[Slot]= 
-  pure def slot_skip_certified(slot: Slot, msgs: Set[NetWorkMsg]): bool = 
-      msgs.filter(m => m.msg == SkipVoteMsg(slot))
-          .size() >= sixty 
   msgs.fold(Set(), (s, x) => match x.msg {
                           | SkipVoteMsg(m) => s.union(Set(m))
                           | _ => s
                         })
-              .filter(t => slot_skip_certified(t, msgs))
+              .filter(t => skip_certified(t, msgs))
 
 /// Definition 16
 // Warning "notarization or notar-fallback": notar-fallback seems to imply notar
@@ -430,12 +469,23 @@ action step =
 
 module example {
   import consensus(
-    blocks = Set( {slot: 0, hash: 0, parent: -1}, 
-                  {slot: 1, hash: 1, parent: 0}, 
-                  {slot: 2, hash: 2, parent: 1}, 
-                  {slot: 3, hash: 3, parent: 2}),
+    blocks = Set( {slot: 0, hash: 42, parent: -1}, 
+                  {slot: 1, hash: 43, parent: 42}, 
+                  {slot: 2, hash: 44, parent: 43}, 
+                  {slot: 3, hash: 45, parent: 44}),
     correct = Set("v1", "v2", "v3", "v4"),
     byzantine = Set(),
   ).* 
-  
+}
+
+
+module parent_not_proposed {
+  import consensus(
+    blocks = Set( {slot: 0, hash: 42, parent: -1}, 
+                  {slot: 1, hash: 43, parent: 0}, 
+                  {slot: 2, hash: 44, parent: 0}, 
+                  {slot: 3, hash: 45, parent: 0}),
+    correct = Set("v1", "v2", "v3", "v4"),
+    byzantine = Set(),
+  ).* 
 }
