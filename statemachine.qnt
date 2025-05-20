@@ -49,13 +49,16 @@ type TimeoutEvent
 // CSMI-TODO 
 // This initializes process that is identified by ProcessID
 pure def initialize_process (id: ProcessID): LocalState =
-   0.to(4).mapBy(x => 
-    if (x == 0)
-      { state: Set(ParentReady(-1)), pendingBlock: None }
-    else
-      empty_slot_state)  
-    
-
+   {
+     state: [
+       Set(ParentReady(-1)),
+       Set(),
+       Set(),
+       Set(),
+       Set(),
+     ],
+     pendingBlocks: [None, None, None, None, None]
+  }
 
 
 // // CSMI-TODO
@@ -246,7 +249,7 @@ def fast_agreement =
 // Witness was used to find bug in safeToNotar encoding
 def nobad =
   correct.forall(v => 
-  not(s.system.get(v).get(1).state.contains(BadWindow)))
+  not(s.system.get(v).state[1].contains(BadWindow)))
 
 def never_fast_finalized =
   all_blocks.forall(b =>

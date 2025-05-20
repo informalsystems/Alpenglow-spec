@@ -21,9 +21,10 @@ module alpenglow {
 
   type Blockhash = int
 
-  type SlotState = {
-    pendingBlock: Option[Block],
-    state: Set[SlotObject],
+  /// Fields are lists indexed by slot
+  type LocalState = {
+    pendingBlocks: List[Option[Block]],
+    state: List[Set[SlotObject]],
   }
 
   pure val empty_slot_state =
@@ -45,8 +46,6 @@ module alpenglow {
     | ParentReadyCI({slot: Slot, hash: Blockhash})
     | SafeToNotarCI({slot: Slot, hash: Blockhash})
     | SafeToSkipCI(Slot)
-
-  type LocalState = Slot -> SlotState
 
   /// Table 4 (Alpenglow’s voting messages)
   type Message =
@@ -82,10 +81,10 @@ module alpenglow {
   // Auxiliary functions
 
   pure def add_objects(ls: LocalState, slot: Slot, obj: Set[SlotObject]): LocalState =
-    ls.setBy(slot, s => { ...s, state: s.state.union(obj) })
+    { ...ls, state: ls.state.replaceAt(slot, ls.state[slot].union(obj)) }
 
   pure def set_pending_block(ls: LocalState, slot: Slot, b: Option[Block]): LocalState =
-    ls.setBy(slot, s => { ...s, pendingBlock: b })
+    { ...ls, pendingBlocks: ls.pendingBlocks.replaceAt(slot, b) }
 
   /// line 10 of TryNotar. TODO: Is there more to it?
   pure def first_slot_in_leader_window(slot: Slot): bool =
@@ -110,21 +109,20 @@ module alpenglow {
 
   /// Check if a notarization vote can be cast
   pure def TryNotar(ls: LocalState, b: Block): { result: Result, success: bool } =
-    if (ls.get(b.slot).state.contains(Voted))
+    if (ls.state[b.slot].contains(Voted))
       { result: { post: ls, output: Set() }, success: false }
     else 
       val firstSlot = first_slot_in_leader_window(b.slot) 
-      if ((firstSlot and ParentReady(b.parent).in(ls.get(b.slot).state))
-        or (not(firstSlot) and VotedNotar(b.parent).in(ls.get(b.slot - 1).state)))
+      if ((firstSlot and ParentReady(b.parent).in(ls.state[b.slot]))
+        or (not(firstSlot) and VotedNotar(b.parent).in(ls.state[b.slot - 1])))
         // Warning: parentheses not matching in paper
 
         // Notarization vote
         val out = Set(Broadcast(NotarVoteMsg({ slot:b.slot, hash: b.hash })))
-        val s2 = ls.setBy(b.slot, s => {
-          state: s.state.union(Set(Voted, VotedNotar(b.hash))),
+        val s2 =  ls
+          .add_objects(b.slot, Set(Voted, VotedNotar(b.hash)))
           // Won't vote notar a second time
-          pendingBlock: None
-        })
+          .set_pending_block(b.slot, None)
 
         // Maybe vote finalize as well
         val tf = TryFinal(s2, b.slot, b.hash)
@@ -135,9 +133,9 @@ module alpenglow {
 
   pure def TryFinal(ls: LocalState, slot: Slot, hash: Blockhash): Result =
     if (and {
-      ls.get(slot).state.contains(BlockNotarized(hash)),
-      ls.get(slot).state.contains(VotedNotar(hash)),
-      not(ls.get(slot).state.contains(BadWindow)),
+      ls.state[slot].contains(BlockNotarized(hash)),
+      ls.state[slot].contains(VotedNotar(hash)),
+      not(ls.state[slot].contains(BadWindow)),
     })
       { output: Set(Broadcast(FinalVoteMsg(slot))), 
         post: add_objects(ls, slot, Set(ItsOver)) }
@@ -147,18 +145,18 @@ module alpenglow {
 
   pure def TrySkipWindow(ls: LocalState, slot: Slot): Result =
     WindowSlots(slot).fold({ output: Set(), post: ls } , (s, k) =>
-      if (not(s.post.get(k).state.contains(Voted)))
+      if (not(s.post.state[k].contains(Voted)))
         val update = Set(Broadcast(SkipVoteMsg(k)))
         val s2 = s.post.add_objects(k, Set(Voted, BadWindow))
-                        .set_pending_block(k, None)
+                       .set_pending_block(k, None)
         { output: update, post: s2 }
       else
         s
     )
     
   pure def CheckPendingBlocks(ls: LocalState): Result =
-    ls.values().fold({ output: Set(), post: ls }, (res, s) =>
-      match s.pendingBlock {
+    ls.pendingBlocks.foldl({ output: Set(), post: ls }, (res, pendingBlock) =>
+      match pendingBlock {
         | Some(b) =>
           val tn = TryNotar(res.post, b)
           { output: res.output.union(tn.result.output), post: tn.result.post } // TODO implement
@@ -178,14 +176,14 @@ module alpenglow {
         if (tn.success)
           val cpb = CheckPendingBlocks(tn.result.post)
           { post: cpb.post, output: cpb.output.union(tn.result.output) }
-        else if (not(tn.result.post.get(b.slot).state.contains(Voted)))
-            val s = tn.result.post.put(b.slot, { ... tn.result.post.get(b.slot), pendingBlock: Some(b) })
+        else if (not(tn.result.post.state[b.slot].contains(Voted)))
+            val s = tn.result.post.set_pending_block(b.slot, Some(b))
             { output: tn.result.output, post: s }
         else
           { output: tn.result.output, post: tn.result.post } // Warning: The state might have changed
 
       | TimeOutCI(slot) =>
-        if (ls.get(slot).state.contains(Voted))
+        if (ls.state[slot].contains(Voted))
           TrySkipWindow(ls, slot)
         else
           { output: Set(), post: ls }
@@ -202,7 +200,7 @@ module alpenglow {
 
       | SafeToNotarCI(sh) =>
         val s = TrySkipWindow(ls, sh.slot)
-        if (not(s.post.get(sh.slot).state.contains(ItsOver)))
+        if (not(s.post.state[sh.slot].contains(ItsOver)))
           val output = s.output.union(Set(Broadcast(NotarFallBackVoteMsg(sh))))
           { output: output, post: add_objects(s.post, sh.slot, Set(BadWindow)) }
         else
@@ -210,7 +208,7 @@ module alpenglow {
 
       | SafeToSkipCI(slot) =>
         val s = TrySkipWindow(ls, slot)
-        if (not(s.post.get(slot).state.contains(ItsOver)))
+        if (not(s.post.state[slot].contains(ItsOver)))
           val output = s.output.union(Set(Broadcast(SkipFallbackVoteMsg(slot))))
           { output: output, post: add_objects(s.post, slot, Set(BadWindow)) }
         else
