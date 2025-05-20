@@ -27,9 +27,6 @@ module alpenglow {
     state: List[Set[SlotObject]],
   }
 
-  pure val empty_slot_state =
-    { pendingBlock: None, state: Set() }
-
   /// Definition 18 (Votor State)
   type SlotObject =
     | ParentReady(Blockhash)
@@ -76,7 +73,6 @@ module alpenglow {
     output: Set[ConsensusOutput],
     post: LocalState,
   }
-
 
   // Auxiliary functions
 
@@ -132,29 +128,32 @@ module alpenglow {
         { result: { post: ls, output: Set() }, success: false }
 
   pure def TryFinal(ls: LocalState, slot: Slot, hash: Blockhash): Result =
-    if (and {
-      ls.state[slot].contains(BlockNotarized(hash)),
-      ls.state[slot].contains(VotedNotar(hash)),
-      not(ls.state[slot].contains(BadWindow)),
-    })
-      { output: Set(Broadcast(FinalVoteMsg(slot))), 
-        post: add_objects(ls, slot, Set(ItsOver)) }
+    if (BlockNotarized(hash).in(ls.state[slot]) and VotedNotar(hash).in(ls.state[slot])
+        and not(BadWindow.in(ls.state[slot])))
+      // Finalization vote
+      { output: Set(Broadcast(FinalVoteMsg(slot))), post: ls.add_objects(slot, Set(ItsOver)) }
     else
       { output: Set(), post: ls } 
 
-
   pure def TrySkipWindow(ls: LocalState, slot: Slot): Result =
-    WindowSlots(slot).fold({ output: Set(), post: ls } , (s, k) =>
-      if (not(s.post.state[k].contains(Voted)))
+    // Skip unvoted slots
+    WindowSlots(slot).fold({ output: Set(), post: ls }, (s, k) => {
+      if (not(Voted.in(s.post.state[k])))
+        // Skip vote
         val update = Set(Broadcast(SkipVoteMsg(k)))
-        val s2 = s.post.add_objects(k, Set(Voted, BadWindow))
-                       .set_pending_block(k, None)
-        { output: update, post: s2 }
+        val s2 = s.post
+          .add_objects(k, Set(Voted, BadWindow))
+          // Won't vote notar after skip
+          .set_pending_block(k, None)
+
+        { output: s.output.union(update), post: s2 }
       else
         s
-    )
+    })
     
   pure def CheckPendingBlocks(ls: LocalState): Result =
+    // Iterate with increasing slot
+    // (left to right)
     ls.pendingBlocks.foldl({ output: Set(), post: ls }, (res, pendingBlock) =>
       match pendingBlock {
         | Some(b) =>
@@ -176,45 +175,45 @@ module alpenglow {
         if (tn.success)
           val cpb = CheckPendingBlocks(tn.result.post)
           { post: cpb.post, output: cpb.output.union(tn.result.output) }
-        else if (not(tn.result.post.state[b.slot].contains(Voted)))
+        else if (not(Voted.in(tn.result.post.state[b.slot])))
             val s = tn.result.post.set_pending_block(b.slot, Some(b))
             { output: tn.result.output, post: s }
         else
           { output: tn.result.output, post: tn.result.post } // Warning: The state might have changed
 
       | TimeOutCI(slot) =>
-        if (ls.state[slot].contains(Voted))
+        if (Voted.in(ls.state[slot]))
           TrySkipWindow(ls, slot)
         else
           { output: Set(), post: ls }
 
       | BlockNotarizedCI(sh) =>
-        val s = add_objects(ls, sh.slot, Set(BlockNotarized(sh.hash)))
+        val s = ls.add_objects(sh.slot, Set(BlockNotarized(sh.hash)))
         TryFinal(s, sh.slot, sh.hash)
 
       | ParentReadyCI(sh) =>
-        val s = add_objects(ls, sh.slot, Set(ParentReady(sh.hash)))
+        val s = ls.add_objects(sh.slot, Set(ParentReady(sh.hash)))
         val s1 = CheckPendingBlocks(s)
+        // Start time for all slots in this window
         val s2 = SetTimeouts(s1.post, sh.slot)
         { output: s1.output.union(s2.output), post: s2.post }
 
       | SafeToNotarCI(sh) =>
         val s = TrySkipWindow(ls, sh.slot)
-        if (not(s.post.state[sh.slot].contains(ItsOver)))
+        if (not(ItsOver.in(s.post.state[sh.slot])))
+          // Notar-fallback vote
           val output = s.output.union(Set(Broadcast(NotarFallBackVoteMsg(sh))))
-          { output: output, post: add_objects(s.post, sh.slot, Set(BadWindow)) }
+          { output: output, post: s.post.add_objects(sh.slot, Set(BadWindow)) }
         else
           s
 
       | SafeToSkipCI(slot) =>
         val s = TrySkipWindow(ls, slot)
-        if (not(s.post.state[slot].contains(ItsOver)))
+        if (not(ItsOver.in(s.post.state[slot])))
+          // Skip-fallback vote
           val output = s.output.union(Set(Broadcast(SkipFallbackVoteMsg(slot))))
           { output: output, post: add_objects(s.post, slot, Set(BadWindow)) }
         else
           s
     }
-
-
-
 }
