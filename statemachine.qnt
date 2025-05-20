@@ -74,15 +74,6 @@ module consensus {
     activeTimeouts: ProcessID -> Set[TimeoutEventData],
   }
 
-  var s: Environment
-
-  pure def initial_global_state: Environment =
-    { system: correct.mapBy(_ => initial_local_state),
-      now: 0,
-      msgBuffer: Set(),
-      activeTimeouts: correct.mapBy(v => Set()),
-    }
-
   /// Interface consensus algorithm / state machine: how consensus algorithm effects the environment
   pure def apply_effect (env: Environment, v: ProcessID, res: Result): Environment =
     val new = { ... env, system: env.system.set(v, res.post) } // update the state of the process
@@ -95,11 +86,7 @@ module consensus {
           { ...s, activeTimeouts: s.activeTimeouts.set(v, s.activeTimeouts.get(v).union(Set(slot))) }
       })
 
-  //
-  // General state machine
-  //
-
-  // Certificates
+  // Defnition 13 (certificates)
 
   pure def fast_finalization_certified(slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool =
     msgs.filter(m => m.msg == NotarVoteMsg({ slot: slot, hash: hash }))
@@ -124,8 +111,9 @@ module consensus {
         .size() >= sixty
 
 
-  /// Definition 15
-  /// Warning definitions uses "unique" perhaps unclear in case of more faults
+  // Definition 14 (finalization)
+  // Warning definitions uses "unique" perhaps unclear in case of more faults
+
   pure def finalized(slot: Slot, msgs: Set[NetWorkMsg]): Set[Blockhash] =
     NotarizedBlocks(msgs)
       .filter(t => t.slot == slot)
@@ -139,30 +127,22 @@ module consensus {
       .filter(t => fast_finalization_certified(t.slot, t.hash, msgs))
       .map(t => t.hash)
 
+
   //
   //
-  // Invariants and Witnesses
+  // State Machine
   //
   //
 
-  def agreement =
-    0.to(s.now).forall(slot => finalized(slot, s.msgBuffer).size() <= 1)
-
-  def fast_agreement =
-    0.to(s.now).forall(slot => fast_finalized(slot, s.msgBuffer).union(finalized(slot, s.msgBuffer)).size() <= 1)
-
-  // Witness was used to find bug in safeToNotar encoding
-  def nobad =
-    correct.forall(v =>
-    not(s.system.get(v).state[1].contains(BadWindow)))
-
-  def never_fast_finalized =
-    all_blocks.forall(b => not(fast_finalization_certified(b.slot, b.hash, s.msgBuffer)))
-
-  // TODO finalize ancestors
+  var s: Environment
 
   action init = all {
-    s' = initial_global_state
+    s' = {
+      system: correct.mapBy(_ => initial_local_state),
+      now: 0,
+      msgBuffer: Set(),
+      activeTimeouts: correct.mapBy(v => Set()),
+    }
   }
 
   action receive_block(v: ProcessID, now: Slot): bool = all{
@@ -171,22 +151,22 @@ module consensus {
     s' = apply_effect(s, v, result)
   }
 
-  action fire_timeout_event(v: ProcessID, now: Slot): bool = all{
-      s.activeTimeouts.get(v) != Set(),
-      nondet timeout = oneOf(s.activeTimeouts.get(v).filter(t => t == now))
-      val s2 = { ... s, activeTimeouts: s.activeTimeouts.set(v, s.activeTimeouts.get(v).exclude(Set(timeout))) }
-      val result = consensus(s2.system.get(v), TimeOutCI(timeout))
-      s' = apply_effect(s2, v, result)
+  action fire_timeout_event(v: ProcessID, now: Slot): bool = all {
+    s.activeTimeouts.get(v) != Set(),
+    nondet timeout = oneOf(s.activeTimeouts.get(v).filter(t => t == now))
+    val s2 = { ... s, activeTimeouts: s.activeTimeouts.set(v, s.activeTimeouts.get(v).exclude(Set(timeout))) }
+    val result = consensus(s2.system.get(v), TimeOutCI(timeout))
+    s' = apply_effect(s2, v, result)
   }
 
-  pure def NotarizedBlocks(msgs: Set[NetWorkMsg]): Set[{slot: Slot, hash: Blockhash}]=
+  pure def NotarizedBlocks(msgs: Set[NetWorkMsg]): Set[{ slot: Slot, hash: Blockhash }] =
     msgs.fold(Set(), (s, x) => match x.msg {
                             | NotarVoteMsg(m) => s.union(Set(m))
                             | _ => s
                           })
                 .filter(t => notarization_certified(t.slot, t.hash, msgs))
 
-  pure def NotarFallBackBlocks(msgs: Set[NetWorkMsg]): Set[{slot: Slot, hash: Blockhash}]=
+  pure def NotarFallBackBlocks(msgs: Set[NetWorkMsg]): Set[{ slot: Slot, hash: Blockhash }] =
     msgs.fold(Set(), (s, x) => match x.msg {
                             | NotarVoteMsg(m) => s.union(Set(m))
                             | NotarFallBackVoteMsg(m) => s.union(Set(m))
@@ -194,7 +174,7 @@ module consensus {
                           })
                 .filter(t => notar_fallback_certified(t.slot, t.hash, msgs))
 
-  pure def SlotSkipCertified(msgs: Set[NetWorkMsg]): Set[Slot]=
+  pure def SlotSkipCertified(msgs: Set[NetWorkMsg]): Set[Slot] =
     msgs.fold(Set(), (s, x) => match x.msg {
                             | SkipVoteMsg(m) => s.union(Set(m))
                             | _ => s
@@ -202,8 +182,7 @@ module consensus {
                 .filter(t => skip_certified(t, msgs))
 
 
-
-  def NotarizedBlocksCondition(v: ProcessID, now: Slot, b: {slot: Slot, hash: Blockhash}): bool =
+  def NotarizedBlocksCondition(v: ProcessID, now: Slot, b: { slot: Slot, hash: Blockhash }): bool =
     NotarizedBlocks(s.msgBuffer).contains(b)
 
   // BlockNotarized
@@ -215,11 +194,10 @@ module consensus {
       s' = apply_effect(s, v, consensus(s.system.get(v), BlockNotarizedCI({slot: b.slot, hash: b.hash})))
     }
 
-
-  /// Definition 16
+  /// Definition 16 (fallback events)
   // Warning "notarization or notar-fallback": notar-fallback seems to imply notar
   // Warning: Previous block? Block for previous slot
-  pure def ParentReadyCondition (slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool = all {
+  pure def ParentReadyCondition(slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool = all {
     first_slot_in_leader_window(slot),
     val pool = NotarizedBlocks(msgs).filter(t => t.hash == hash and t.slot == slot)
     pool.exists(b =>
@@ -243,21 +221,20 @@ module consensus {
     }
 
 
-  pure def voted_to_skip (s: Slot, msgs: Set[NetWorkMsg]): Set[ProcessID] =
+  pure def voted_to_skip(s: Slot, msgs: Set[NetWorkMsg]): Set[ProcessID] =
     msgs.filter(m => match m.msg {
       | SkipVoteMsg(slot) => slot == s
       | _ => false}).map(m => m.sender)
 
-  pure def voted_to_notar_pair (slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): Set[ProcessID] =
+  pure def voted_to_notar_pair(slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): Set[ProcessID] =
     msgs.filter(m => match m.msg {
       | NotarVoteMsg(x) => x.slot == slot and x.hash == hash
-      | _ => false}).map(m => m.sender)
+      | _ => false
+    }).map(m => m.sender)
 
   // Warning: vote doesn't contain parent. Assumption about parent hashed in hash?
   pure def voted_to_notar (b: Block, msgs: Set[NetWorkMsg]): Set[ProcessID] =
     voted_to_notar_pair(b.slot, b.hash, msgs)
-
-
 
   def SafeToNotarCondition(v: ProcessID, now: Slot, b: Block): bool = all {
     // Definition 17: The event is only issued if the node voted in slot s already, but not to notarize b.
@@ -339,6 +316,28 @@ module consensus {
       SafeToSkipAction(v, s.now),
      // tick, // increment the slot
     }
+
+  //
+  //
+  // Invariants and Witnesses
+  //
+  //
+
+  def agreement =
+    0.to(s.now).forall(slot => finalized(slot, s.msgBuffer).size() <= 1)
+
+  def fast_agreement =
+    0.to(s.now).forall(slot => fast_finalized(slot, s.msgBuffer).union(finalized(slot, s.msgBuffer)).size() <= 1)
+
+  // Witness was used to find bug in safeToNotar encoding
+  def nobad =
+    correct.forall(v =>
+    not(s.system.get(v).state[1].contains(BadWindow)))
+
+  def never_fast_finalized =
+    all_blocks.forall(b => not(fast_finalization_certified(b.slot, b.hash, s.msgBuffer)))
+
+  // TODO finalize ancestors
 }
 
 module example {
