@@ -370,8 +370,7 @@ module consensus {
     val blocksWithNotarVotes =
       allMessages
         .filter(m => slotOf(m.msg) == now)
-        .map(m => m.msg)
-        .fold(Set(), (s, m) => match m {
+        .fold(Set(), (s, m) => match m.msg {
           | NotarVoteMsg(n) => s.setAdd(n)
           | _ => s
         })
@@ -383,12 +382,12 @@ module consensus {
         res
     })
 
-    val sumNotar = blocksWithNotarVotes.map(m => m.hash).fold(Set(), (res, x) =>
-      res.union(votedToNotar({ slot: now, hash: x }, allMessages)))
+    val sumNotar = blocksWithNotarVotes.fold(Set(), (res, b) =>
+      res.union(votedToNotar(b, allMessages)))
 
-    // TODO: check and rewrite with surpassesThreshold, if possible
-    (votedToSkip(now, allMessages).union(sumNotar).size() -
-      votedToNotar(maxNotar, allMessages).size()) * 100 >= 40
+    votedToSkip(now, allMessages).union(sumNotar).exclude(
+      votedToNotar(maxNotar, allMessages)
+    ).surpassesThreshold(40)
   }
 
   // Emit SafeToSkip and process it
@@ -454,8 +453,7 @@ module consensus {
 
   // Witness was used to find bug in safeToNotar encoding
   val noBad =
-    benevolent.forall(v =>
-    not(s.system.get(v).state[1].contains(BadWindow)))
+    benevolent.forall(v => not(s.system.get(v).state[1].contains(BadWindow)))
 
   /// Witness to find a run where a block is fast finalized
   val fastFinalizedWitness =
