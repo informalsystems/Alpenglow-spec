@@ -4,12 +4,14 @@
  *
  * [1]: https://drive.google.com/file/d/1y_7ddr8oNOknTQYHzXeeMD2ProQ0WjMs/view
  *
- * Josef Widder,
+ * Josef Widder, Gabriela Moreira
  * Informal Systems, 2025
  */
 
 module alpenglow {
   import basicSpells.* from "./basicSpells"
+
+  type ProcessID = str
 
   type Slot = int
 
@@ -54,14 +56,12 @@ module alpenglow {
     | SkipFallbackVoteMsg(Slot)
     | FinalVoteMsg(Slot)
 
-  pure def slotOf(msg: Message): Slot =
-    match msg {
-      | NotarVoteMsg(m) => m.slot
-      | NotarFallBackVoteMsg(m) => m.slot
-      | SkipVoteMsg(slot) => slot
-      | SkipFallbackVoteMsg(slot) => slot
-      | FinalVoteMsg(slot) => slot
-    }
+  type Certificate =
+    | FastFinalizationCertificate(BlockReference)
+    | NotarizationCertificate(BlockReference)
+    | NotarFallbackCertificate(BlockReference)
+    | SkipCertificate(Slot)
+    | FinalizationCertificate(Slot)
 
   type TimeoutEventData = Slot // TODO not sure what timeouts they start
 
@@ -76,7 +76,88 @@ module alpenglow {
     post: LocalState,
   }
 
+  /// Messages on the network carry the sender (the broadcast call in the pseudo code
+  /// doesn't carry the sender, so does our encoding of the consensus main loop)
+  type NetworkMsg = {
+    sender: ProcessID,
+    msg: Message,
+  }
+
+  /// Set of correct processes (non Byzantine)
+  const correct: Set[ProcessID]
+
+  /// Set of processes that follow the algorithm but might fail in a benign way
+  const good: Set[ProcessID]
+
+  /// Set of Byzantine processes
+  const byzantine: Set[ProcessID]
+
+  /// Set of blocks
+  const correctBlocks: Set[Block]
+  /// Set of Byzantine blocks
+  const byzantineBlocks: Set[Block]
+
+  /// Set of all blocks
+  pure val allBlocks = correctBlocks.union(byzantineBlocks)
+
+  /// Set of correct processes and processes that follow the algorithm but might fail in a benign way
+  pure val benevolent = correct.union(good)
+
+  pure val maxSlot = allBlocks.fold(-1, (s, x) => max(x.slot, s))
+
+  /// Slots for which this model considers votes
+  const aliveSlots: Set[Slot]
+  /// Hashes for which this model considers votes
+  const aliveHashes: Set[Blockhash]
+
+  //
+  // Constraints on the number of processes
+  //
+
+  assume uniqueRole = and {
+    correct.intersect(byzantine) == Set(),
+    correct.intersect(good) == Set(),
+    good.intersect(byzantine) == Set(),
+  }
+
+  pure val numProcesses = correct.size() + good.size() + byzantine.size()
+
+  // Assumption 1 and Assumption 2
+  assume resilienceCondition = all {
+    numProcesses > byzantine.size() * 5, // N > 5F
+    numProcesses > good.size() * 5,
+  }
+
+  /// Checks for thresholds, using the known number of processes
+  pure def surpassesThreshold(votes, threshold) =
+    votes.size() * 100 >= numProcesses * threshold
+
+  /// All votes that can be sent by the Byzantine processes (without senders)
+  pure val byzMessages = tuples(aliveSlots, aliveHashes).map(((slot, hash)) =>
+    Set(
+      NotarVoteMsg({ slot: slot, hash: hash }),
+      NotarFallBackVoteMsg({ slot: slot, hash: hash }),
+      SkipVoteMsg(slot),
+      SkipFallbackVoteMsg(slot),
+      FinalVoteMsg(slot)
+    )
+  ).flatten()
+
+  /// All votes that can be sent by the Byzantine processes
+  pure val byzNetworkMsgs = tuples(byzantine, byzMessages).map(((sender, msg)) =>
+    { sender: sender, msg: msg }
+  )
+
   // Auxiliary functions
+
+  pure def slotOf(msg: Message): Slot =
+    match msg {
+      | NotarVoteMsg(m) => m.slot
+      | NotarFallBackVoteMsg(m) => m.slot
+      | SkipVoteMsg(slot) => slot
+      | SkipFallbackVoteMsg(slot) => slot
+      | FinalVoteMsg(slot) => slot
+    }
 
   pure def reference(b: Block): BlockReference = { slot: b.slot, hash: b.hash }
 
@@ -89,6 +170,101 @@ module alpenglow {
   /// line 10 of TryNotar. TODO: Is there more to it?
   pure def firstSlotInLeaderWindow(slot: Slot): bool =
     slot % 4 == 0 // TODO implement
+
+  pure def notarizedBlocks(msgs: Set[NetworkMsg]): Set[BlockReference] =
+    msgs
+      .fold(Set(), (s, x) => match x.msg {
+        | NotarVoteMsg(m) => s.union(Set(m))
+        | _ => s
+      })
+      .filter(b => isCertified(NotarizationCertificate(b), msgs))
+
+  pure def notarFallbackBlocks(msgs: Set[NetworkMsg]): Set[BlockReference] =
+    msgs
+      .fold(Set(), (s, x) => match x.msg {
+        | NotarVoteMsg(m) => s.union(Set(m))
+        | NotarFallBackVoteMsg(m) => s.union(Set(m))
+        | _ => s
+      })
+      .filter(b => isCertified(NotarFallbackCertificate(b), msgs))
+
+  pure def slotsSkipCertified(msgs: Set[NetworkMsg]): Set[Slot] =
+    msgs
+      .fold(Set(), (s, x) => match x.msg {
+        | SkipVoteMsg(m) => s.union(Set(m))
+        | _ => s
+      })
+      .filter(s => isCertified(SkipCertificate(s), msgs))
+
+  // Definition 5 (ancestor and descendant). An ancestor of a block b is any
+  // block that can be reached from b by the parent links, i.e., b, b’s parent,
+  // b’s parent’s parent, and so on. If b′ is an ancestor of b, b is a
+  // descendant of b′ . Note that b is its own ancestor and descendant.
+  pure def isDescendant(a: Block, b: Block): bool =
+    // TODO: this can have better performance if we can make assumptions about slots
+    allBlocks.fold(Set(b.hash), (s, x) =>
+      allBlocks.fold(s, (s, x) =>
+        if (s.exists(hash => x.parent == hash))
+          s.union(Set(x.parent))
+        else
+          s
+      )
+    ).contains(a.hash)
+
+  // Definition 13 (certificates)
+  // They are defined over a set of messages. Currently we evaluate this over the
+  // message soup. But they can be also used over locally received messages if such
+  // a semantics is needed.
+
+  /// Table 5: Apenglow's certificate messages.
+  pure def isCertified(cert: Certificate, msgs: Set[NetworkMsg]): bool = {
+    pure val aggregatedVotes = msgs.filter(m => {
+      match cert {
+        | FastFinalizationCertificate(b) =>
+          m.msg == NotarVoteMsg(b)
+        | NotarizationCertificate(b) =>
+          m.msg == NotarVoteMsg(b)
+        | NotarFallbackCertificate(b) =>
+          m.msg == NotarVoteMsg(b) or m.msg == NotarFallBackVoteMsg(b)
+        | SkipCertificate(s) =>
+          m.msg == SkipVoteMsg(s) or m.msg == SkipFallbackVoteMsg(s)
+        | FinalizationCertificate(s) =>
+          m.msg == FinalVoteMsg(s)
+      }
+    })
+
+    pure val threshold = match cert {
+      | FastFinalizationCertificate => 80
+      | NotarizationCertificate => 60
+      | NotarFallbackCertificate => 60
+      | SkipCertificate => 60
+      | FinalizationCertificate => 60
+    }
+
+    aggregatedVotes.surpassesThreshold(threshold)
+  }
+
+  // Definition 14 (finalization). We have two ways to finalize a block:
+  // Warning: definitions uses "unique" perhaps unclear in case of more faults
+
+  /// If a finalization certificate on slot s is in Pool, the unique notarized block
+  /// in slot s is finalized (we call this slow-finalized).
+  pure def finalized(slot: Slot, msgs: Set[NetworkMsg]): Set[Blockhash] =
+    notarizedBlocks(msgs) // we derive the blocks from the votes in msgs here
+      .filter(b => b.slot == slot)
+      .filter(b => {
+        isCertified(FinalizationCertificate(b.slot), msgs)
+          and isCertified(NotarizationCertificate(b), msgs)
+      })
+      .map(b => b.hash)
+
+  /// If a fast-finalization certificate on block b is in Pool, the block b is
+  /// finalized (fast-finalized).
+  pure def fastFinalized(slot: Slot, msgs: Set[NetworkMsg]): Set[Blockhash] =
+    notarizedBlocks(msgs)
+      .filter(b => b.slot == slot)
+      .filter(b => isCertified(FastFinalizationCertificate(b), msgs))
+      .map(b => b.hash)
 
   // Algorithm 2
 
