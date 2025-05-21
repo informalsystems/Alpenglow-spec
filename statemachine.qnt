@@ -31,6 +31,13 @@ module consensus {
   /// Set of all blocks
   pure val all_blocks = correct_blocks.union(byz_blocks)
 
+  pure val max_slot = all_blocks.fold(-1, (s, x) =>
+    if (x.slot > s)
+      x.slot
+    else
+      s
+  )
+
   /// Slots for which this model considers votes
   const alive_slots: Set[Slot]
   /// Hashes for which this model considers votes
@@ -42,13 +49,16 @@ module consensus {
   // Assumption 2 on additional crashes: TODO
 
   /// Threshold 20% of votes (not considering voting power)
-  val twenty = correct.union(byzantine).size() * 20 / 100 + 1
+  val twenty = correct.union(byzantine).size() * 20
   /// Threshold 40% of votes (not considering voting power)
-  val forty = correct.union(byzantine).size() * 40 / 100 + 1
+  val forty = correct.union(byzantine).size() * 40
   /// Threshold 60% of votes (not considering voting power)
-  val sixty = correct.union(byzantine).size() * 60 / 100 + 1
+  val sixty = correct.union(byzantine).size() * 60
   /// Threshold 80% of votes (not considering voting power)
-  val eighty = correct.union(byzantine).size() * 80 / 100 + 1
+  val eighty = correct.union(byzantine).size() * 80
+
+  pure def surpasses_threshold(votes, threshold) =
+    votes.size() * 100 >= threshold
 
   type NetWorkMsg = {
     sender: ProcessID,
@@ -110,25 +120,25 @@ module consensus {
 
   pure def fast_finalization_certified(slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool =
     msgs.filter(m => m.msg == NotarVoteMsg({ slot: slot, hash: hash }))
-        .size() >= eighty
+        .surpasses_threshold(eighty)
 
   pure def notarization_certified(slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool =
     msgs.filter(m => m.msg == NotarVoteMsg({ slot: slot, hash: hash }))
-        .size() >= sixty
+        .surpasses_threshold(sixty)
 
   pure def notar_fallback_certified(slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool =
     msgs.filter(m => m.msg == NotarVoteMsg({ slot: slot, hash: hash }) or
                      m.msg == NotarFallBackVoteMsg({ slot: slot, hash: hash }) )
-          .size() >= sixty
+          .surpasses_threshold(sixty)
 
   pure def skip_certified(slot: Slot, msgs: Set[NetWorkMsg]): bool =
     msgs.filter(m => m.msg == SkipVoteMsg(slot) or
                      m.msg == SkipFallbackVoteMsg(slot) )
-        .size() >= sixty
+       .surpasses_threshold(sixty) 
 
   pure def finalization_certified(slot: Slot, msgs: Set[NetWorkMsg]): bool =
     msgs.filter(m => m.msg == FinalVoteMsg(slot))
-        .size() >= sixty
+        .surpasses_threshold(sixty)
 
 
   // Definition 14 (finalization)
@@ -282,11 +292,17 @@ module consensus {
       notar_voted.size() == 0,
     },
     all_blocks.filter(b => b.slot == now).contains(b),
-    val notar = voted_to_notar(b, all_messages).size()
-    val skip = voted_to_skip(now, all_messages).size()
+    val notar = voted_to_notar(b, all_messages)
+    val skip = voted_to_skip(now, all_messages)
     // notar(b) ≥ 40% or (skip(s) + notar(b) ≥ 60% and notar(b) ≥ 20%).
     // Question: is (+) here the sum of the sizes or the size of the union?
-    notar >= forty or (notar + skip >= sixty and notar >= twenty)
+    or {
+      surpasses_threshold(notar, forty),
+      and {
+        surpasses_threshold(skip.union(notar), sixty),
+        surpasses_threshold(notar, twenty)
+      }
+    }
   }
 
   // Emit SafeToNotar and process it
@@ -322,8 +338,9 @@ module consensus {
         res)
     val sum_notar = blocks_with_notar_votes.map(m => m.hash).fold(Set(), (res, x) =>
       res.union(voted_to_notar_pair(now, x, all_messages)))
-    voted_to_skip(now, all_messages).union(sum_notar).size() -
-    voted_to_notar_pair(max_notar.slot, max_notar.hash, all_messages).size() >= forty
+    // TODO: check and rewrite with surpasses_threshold, if possible
+    (voted_to_skip(now, all_messages).union(sum_notar).size() -
+    voted_to_notar_pair(max_notar.slot, max_notar.hash, all_messages).size()) * 100 >= forty
   }
 
   // Emit SafeToSkip and process it
@@ -332,20 +349,46 @@ module consensus {
     v.process_input(SafeToSkipCI(now)),
   }
 
-  action tick =
-    s' = { ... s, now: s.now + 1 }
-
-  action step =
+  action message_response = 
     nondet v = oneOf(correct)
     any {
       receive_block(v, s.now),
-      // TODO: fire_timeout_event(v),
       BlockNotarizedAction(v, s.now), // we pass the global time here, but we might also model that a validator is ahead / behind time
       ParentReadyAction(v, s.now),
       SafeToNotarAction(v, s.now),
       SafeToSkipAction(v, s.now),
-     // tick, // increment the slot
     }
+
+
+  action tick = all {
+    s.now < max_slot,
+    s' = { ... s, now: s.now + 1 }
+  }
+
+  action step = any {
+    message_response,
+    nondet v = oneOf(correct)
+    fire_timeout_event(v, s.now),
+    tick,
+  }
+
+  /// no timeout ever expires
+  action no_timeout = any {
+    message_response,
+    tick,
+  }
+
+  /// never tick (leave slot 0)
+  action one_slot = any {
+    message_response,
+    nondet v = oneOf(correct)
+    fire_timeout_event(v, s.now),
+  }
+
+  /// slot 0 never expires nor any process times out
+  action one_slot_no_timeout = 
+    message_response
+
 
   //
   //
@@ -382,37 +425,73 @@ module consensus {
   // TODO finalize ancestors
 }
 
-module example {
+module only_correct {
   import consensus(
     correct_blocks = Set( {slot: 0, hash: 42, parent: -1}, 
                   {slot: 1, hash: 43, parent: 42}, 
                   {slot: 2, hash: 44, parent: 43}, 
                   {slot: 3, hash: 45, parent: 44}),
     byz_blocks = Set(),
-    alive_slots = 1.to(4),
+    alive_slots = 0.to(4),
     alive_hashes = 42.to(50),
     correct = Set("v1", "v2", "v3", "v4", "v5"),
     byzantine = Set(),
   ).* 
 }
 
-
-module byz {
+module some_byz {
   import consensus(
     correct_blocks = Set( {slot: 0, hash: 42, parent: -1}, 
-                  // {slot: 1, hash: 43, parent: 42}, 
-                  // {slot: 2, hash: 44, parent: 43}, 
-                  // {slot: 3, hash: 45, parent: 44}
+                  {slot: 1, hash: 43, parent: 42}, 
+                  {slot: 2, hash: 44, parent: 43}, 
     ),
+    byz_blocks = Set( {slot: 0, hash: 45, parent: -1},
+                  {slot: 1, hash: 46, parent: 42}, 
+                  {slot: 1, hash: 47, parent: 45}, 
+                  {slot: 2, hash: 48, parent: 43}, 
+                  {slot: 2, hash: 49, parent: 45}
+    ),
+    alive_slots = 0.to(2),
+    alive_hashes = 42.to(49),
+    correct = Set("v1", "v2", "v3", "v4", "v5"),
+    byzantine = Set("b1"),
+  ).* 
+}
+
+module too_many_byz_1 {
+
+  // to violate agreement, run
+  // quint run statemachine.qnt --main too_many_byz_1 --step one_slot_no_timeout  --invariant agreement       
+
+  import consensus(
+    correct_blocks = Set( {slot: 0, hash: 42, parent: -1}, 
+                  {slot: 1, hash: 43, parent: 42}, 
+                  {slot: 2, hash: 44, parent: 43}, 
+    ),
+    byz_blocks = Set( {slot: 0, hash: 45, parent: -1},
+                  {slot: 1, hash: 46, parent: 42}, 
+                  {slot: 1, hash: 47, parent: 45}, 
+                  {slot: 2, hash: 48, parent: 43}, 
+                  {slot: 2, hash: 49, parent: 45}
+    ),
+    alive_slots = 0.to(2),
+    alive_hashes = 42.to(49),
     correct = Set("v1", "v2", "v3", "v4"),
-    byz_blocks = Set( 
-                   {slot: 0, hash: 41, parent: -1},
-    //               {slot: 1, hash: 48, parent: 42}, 
-    //               {slot: 2, hash: 49, parent: 43}, 
-    //               {slot: 3, hash: 50, parent: 44}
-    ),
+    byzantine = Set("b1"),
+  ).* 
+}
+
+module too_many_byz {
+
+  // to violate agreement, run
+  // quint run statemachine.qnt --main too_many_byz --step one_slot_no_timeout  --invariant agreement       
+
+  import consensus(
+    correct_blocks = Set( {slot: 0, hash: 42, parent: -1}, ),
+    correct = Set("v1", "v2", "v3", "v4"),
+    byz_blocks = Set( {slot: 0, hash: 41, parent: -1}, ),
     alive_slots = Set(0), // 0.to(4),
     alive_hashes = 41.to(42),
-    byzantine = Set("v5", "v6"),
+    byzantine = Set("b1", "b2"),
   ).* 
 }
