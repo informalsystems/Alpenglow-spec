@@ -165,8 +165,7 @@ module alpenglow {
     )
 
 
-  // Algorithm 1
-
+  /// Algorithm 1: each upon corresponds to one consensus input
   // Warning: Block vs. Blockevent a bit unclear
   pure def consensus(ls: LocalState, ci: ConsensusInput): Result =
     match ci {
@@ -174,17 +173,21 @@ module alpenglow {
         val tn = TryNotar(ls, b) // looks like a function but has two side effects: changes state and broadcasts
         if (tn.success)
           val cpb = CheckPendingBlocks(tn.result.post)
+          // as TryNotar changed the local state, we pass it to CheckPendingBlocks
           { post: cpb.post, output: cpb.output.union(tn.result.output) }
+          // both, TryNotar and CheckPendingBlocks have side effects of sending messages. Thus we build the union here.
         else if (not(Voted.in(tn.result.post.state[b.slot])))
             val s = tn.result.post.set_pending_block(b.slot, Some(b))
             { output: tn.result.output, post: s }
         else
+          // Even if all if conditions evaluate to false, TryNotar may have side effects and may change the local state
           { output: tn.result.output, post: tn.result.post } // Warning: The state might have changed
 
       | TimeOutCI(slot) =>
         if (Voted.in(ls.state[slot]))
           TrySkipWindow(ls, slot)
         else
+          // No change state, no messages sent
           { output: Set(), post: ls }
 
       | BlockNotarizedCI(sh) =>

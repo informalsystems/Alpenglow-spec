@@ -62,14 +62,12 @@ module consensus {
 
   val num_processes = correct.size() + good.size() + byzantine.size()
 
-  // Assumption 1
-  assume resilience_condition_byz = all {
+  // Assumption 1 and Assumption 2 
+  assume resilience_condition = all {
     num_processes > byzantine.size() * 5, // N > 5F
     num_processes > good.size() * 5,
   }
 
-
-  // Assumption 2 on additional crashes: TODO
 
   /// Threshold 20% of votes (not considering voting power)
   val twenty = benevolent.union(byzantine).size() * 20
@@ -80,9 +78,13 @@ module consensus {
   /// Threshold 80% of votes (not considering voting power)
   val eighty = benevolent.union(byzantine).size() * 80
 
+  /// Checks for thresholds. Encoding uses the values 'twenty', 'forty', 'sixty', 'eighty'
+  /// so that we don't need to pass the number of processes around
   pure def surpasses_threshold(votes, threshold) =
     votes.size() * 100 >= threshold
 
+  /// Messages on the network carry the sender (the broadcast call in the pseudo code
+  /// doesn't carry the sender, so does our encoding of the consensus main loop)
   type NetWorkMsg = {
     sender: ProcessID,
     msg: Message,
@@ -119,12 +121,14 @@ module consensus {
       )
     ).contains(a.hash)
 
+  /// This is all the information of the global state
   type Environment = {
-    system: ProcessID -> LocalState,
-    now: Slot, // we can push to different views of slots later
-    msgBuffer: Set[NetWorkMsg],
-    activeTimeouts: ProcessID -> Set[TimeoutEventData],
+    system: ProcessID -> LocalState,  // process states
+    now: Slot,                        // global time, we can push to different views of slots later
+    msgBuffer: Set[NetWorkMsg],       // messages sent so far, a.k.a. the message soup
+    activeTimeouts: ProcessID -> Set[TimeoutEventData], // started timeouts per process
   }
+
 
   /// Interface consensus algorithm / state machine: how consensus algorithm effects the environment
   pure def apply_effect (env: Environment, v: ProcessID, res: Result): Environment =
@@ -139,7 +143,10 @@ module consensus {
       })
 
 
-  // Defnition 13 (certificates)
+  // Definition 13 (certificates)
+  // They are defined over a set of messages. Currently we evaluate this over the
+  // message soup. But they can be also used over locally received messages if such
+  // a semantics is needed.
 
   pure def fast_finalization_certified(slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool =
     msgs.filter(m => m.msg == NotarVoteMsg({ slot: slot, hash: hash }))
@@ -168,7 +175,7 @@ module consensus {
   // Warning definitions uses "unique" perhaps unclear in case of more faults
 
   pure def finalized(slot: Slot, msgs: Set[NetWorkMsg]): Set[Blockhash] =
-    NotarizedBlocks(msgs)
+    NotarizedBlocks(msgs) // we derive the blocks from the votes in msgs here
       .filter(t => t.slot == slot)
       .filter(t => finalization_certified(t.slot, msgs) and
                    notarization_certified(t.slot, t.hash, msgs))
@@ -188,6 +195,10 @@ module consensus {
 
   var s: Environment
 
+  /// all the messages that could be received, i.e., the ones sent by benevolent processes
+  /// and the ones that byzantine processes may send. We use this in the actions to allow
+  /// processes to respond to byzantine behavior. At the same time, we don't clutter
+  /// msgBuffer with byzantine messages.
   val all_messages = s.msgBuffer.union(byz_network_msgs)
 
   action init = all {
@@ -200,18 +211,26 @@ module consensus {
   }
 
   /// Emit Block and process it
+  /// Warning: The pseudo code uses s. Does this mean s is checked against the local
+  /// view of the slot, and thus only "current" blocks can be received, or could BlockCI(block)
+  /// could also be executed for blocks from future slots?
+  /// This question applies to all "upon"s
   action receive_block(v: ProcessID, now: Slot): bool = all{
     nondet block = all_blocks.filter(b => b.slot == now).oneOf()
     v.process_input(BlockCI(block))
   }
 
-  /// Fire timeout for current slot (TODO: check if timeout can only fire for current slot)
+  /// Fire timeout for current slot 
   action fire_timeout_event(v: ProcessID, now: Slot): bool = all {
     s.activeTimeouts.get(v).contains(now),
     val s2 = { ...s, activeTimeouts: s.activeTimeouts.set(v, s.activeTimeouts.get(v).exclude(Set(now))) }
     s' = apply_effect(s2, v, consensus(s2.system.get(v), TimeOutCI(now)))
   }
 
+  //
+  // auxiliary functions for actions below
+  //
+  
   pure def NotarizedBlocks(msgs: Set[NetWorkMsg]): Set[{ slot: Slot, hash: Blockhash }] =
     msgs.fold(Set(), (s, x) => match x.msg {
                             | NotarVoteMsg(m) => s.union(Set(m))
