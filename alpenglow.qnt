@@ -19,6 +19,8 @@ module alpenglow {
     parent: Blockhash,
   }
 
+  type BlockReference = { slot: Slot, hash: Blockhash }
+
   type Blockhash = int
 
   /// Fields are lists indexed by slot
@@ -39,15 +41,15 @@ module alpenglow {
   type ConsensusInput =
     | BlockCI(Block)
     | TimeOutCI(Slot)
-    | BlockNotarizedCI({slot: Slot, hash: Blockhash})
-    | ParentReadyCI({slot: Slot, hash: Blockhash})
-    | SafeToNotarCI({slot: Slot, hash: Blockhash})
+    | BlockNotarizedCI(BlockReference)
+    | ParentReadyCI(BlockReference)
+    | SafeToNotarCI(BlockReference)
     | SafeToSkipCI(Slot)
 
   /// Table 4 (Alpenglow’s voting messages)
   type Message =
-    | NotarVoteMsg({slot: Slot, hash: Blockhash})
-    | NotarFallBackVoteMsg({slot: Slot, hash: Blockhash})
+    | NotarVoteMsg(BlockReference)
+    | NotarFallBackVoteMsg(BlockReference)
     | SkipVoteMsg(Slot)
     | SkipFallbackVoteMsg(Slot)
     | FinalVoteMsg(Slot)
@@ -75,6 +77,8 @@ module alpenglow {
   }
 
   // Auxiliary functions
+
+  pure def reference(b: Block): BlockReference = { slot: b.slot, hash: b.hash }
 
   pure def addObjects(ls: LocalState, slot: Slot, obj: Set[SlotObject]): LocalState =
     { ...ls, state: ls.state.replaceAt(slot, ls.state[slot].union(obj)) }

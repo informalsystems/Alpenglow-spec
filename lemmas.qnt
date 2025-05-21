@@ -31,13 +31,13 @@ module lemmas {
   def lemma21 =
     allBlocks.forall(b =>
       slots.forall(slot =>
-        fastFinalizationCertified(slot, b.hash, allMessages) implies
+        isCertified(FastFinalizationCertificate({ slot: slot, hash: b.hash }), allMessages) implies
         all {
           allBlocks.exclude(Set(b)).forall(b2 =>
-            not (notarizationCertified(slot, b2.hash, allMessages))),
+            not (isCertified(NotarizationCertificate({ slot: slot, hash: b2.hash }), allMessages))),
           allBlocks.exclude(Set(b)).forall(b2 =>
-            not (notarFallbackCertified(slot, b2.hash, allMessages))),
-          not (skipCertified(slot, allMessages)),
+            not (isCertified(NotarFallbackCertificate({ slot: slot, hash: b2.hash }), allMessages))),
+          not (isCertified(SkipCertificate(slot), allMessages)),
         }
       )
     )

@@ -95,12 +95,15 @@ module consensus {
 
   /// This is all the information of the global state
   type Environment = {
-    system: ProcessID -> LocalState,  // process states
-    now: Slot,                        // global time, we can push to different views of slots later
-    msgBuffer: Set[NetWorkMsg],       // messages sent so far, a.k.a. the message soup
-    activeTimeouts: ProcessID -> Set[TimeoutEventData], // started timeouts per process
+    // The local state of each process
+    system: ProcessID -> LocalState,
+    // Global time, we can push to different views of slots later
+    now: Slot,
+    // Messages sent so far, a.k.a. the message soup
+    msgBuffer: Set[NetWorkMsg],
+    // Started timeouts per process
+    activeTimeouts: ProcessID -> Set[TimeoutEventData],
   }
-
 
   /// Interface consensus algorithm / state machine: how consensus algorithm effects the environment
   pure def applyEffect(env: Environment, v: ProcessID, res: Result): Environment =
@@ -120,44 +123,62 @@ module consensus {
   // message soup. But they can be also used over locally received messages if such
   // a semantics is needed.
 
-  pure def fastFinalizationCertified(slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool =
-    msgs.filter(m => m.msg == NotarVoteMsg({ slot: slot, hash: hash }))
-        .surpassesThreshold(80)
+  type Certificate =
+    | FastFinalizationCertificate(BlockReference)
+    | NotarizationCertificate(BlockReference)
+    | NotarFallbackCertificate(BlockReference)
+    | SkipCertificate(Slot)
+    | FinalizationCertificate(Slot)
 
-  pure def notarizationCertified(slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool =
-    msgs.filter(m => m.msg == NotarVoteMsg({ slot: slot, hash: hash }))
-        .surpassesThreshold(60)
+  /// Table 5: Apenglow's certificate messages.
+  pure def isCertified(cert: Certificate, msgs: Set[NetWorkMsg]): bool = {
+    pure val aggregatedVotes = msgs.filter(m => {
+      match cert {
+        | FastFinalizationCertificate(b) =>
+          m.msg == NotarVoteMsg(b)
+        | NotarizationCertificate(b) =>
+          m.msg == NotarVoteMsg(b)
+        | NotarFallbackCertificate(b) =>
+          m.msg == NotarVoteMsg(b) or m.msg == NotarFallBackVoteMsg(b)
+        | SkipCertificate(s) =>
+          m.msg == SkipVoteMsg(s) or m.msg == SkipFallbackVoteMsg(s)
+        | FinalizationCertificate(s) =>
+          m.msg == FinalVoteMsg(s)
+      }
+    })
 
-  pure def notarFallbackCertified(slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool =
-    msgs.filter(m => m.msg == NotarVoteMsg({ slot: slot, hash: hash }) or
-                     m.msg == NotarFallBackVoteMsg({ slot: slot, hash: hash }) )
-          .surpassesThreshold(60)
+    pure val threshold = match cert {
+      | FastFinalizationCertificate => 80
+      | NotarizationCertificate => 60
+      | NotarFallbackCertificate => 60
+      | SkipCertificate => 60
+      | FinalizationCertificate => 60
+    }
 
-  pure def skipCertified(slot: Slot, msgs: Set[NetWorkMsg]): bool =
-    msgs.filter(m => m.msg == SkipVoteMsg(slot) or
-                     m.msg == SkipFallbackVoteMsg(slot) )
-       .surpassesThreshold(60)
+    aggregatedVotes.surpassesThreshold(threshold)
+  }
 
-  pure def finalizationCertified(slot: Slot, msgs: Set[NetWorkMsg]): bool =
-    msgs.filter(m => m.msg == FinalVoteMsg(slot))
-        .surpassesThreshold(60)
+  // Definition 14 (finalization). We have two ways to finalize a block:
+  // Warning: definitions uses "unique" perhaps unclear in case of more faults
 
-
-  // Definition 14 (finalization)
-  // Warning definitions uses "unique" perhaps unclear in case of more faults
-
+  /// If a finalization certificate on slot s is in Pool, the unique notarized block
+  /// in slot s is finalized (we call this slow-finalized).
   pure def finalized(slot: Slot, msgs: Set[NetWorkMsg]): Set[Blockhash] =
     notarizedBlocks(msgs) // we derive the blocks from the votes in msgs here
-      .filter(t => t.slot == slot)
-      .filter(t => finalizationCertified(t.slot, msgs) and
-                   notarizationCertified(t.slot, t.hash, msgs))
-      .map(t => t.hash)
+      .filter(b => b.slot == slot)
+      .filter(b => {
+        isCertified(FinalizationCertificate(b.slot), msgs)
+          and isCertified(NotarizationCertificate(b), msgs)
+      })
+      .map(b => b.hash)
 
+  /// If a fast-finalization certificate on block b is in Pool, the block b is
+  /// finalized (fast-finalized).
   pure def fastFinalized(slot: Slot, msgs: Set[NetWorkMsg]): Set[Blockhash] =
     notarizedBlocks(msgs)
-      .filter(t => t.slot == slot)
-      .filter(t => fastFinalizationCertified(t.slot, t.hash, msgs))
-      .map(t => t.hash)
+      .filter(b => b.slot == slot)
+      .filter(b => isCertified(FastFinalizationCertificate(b), msgs))
+      .map(b => b.hash)
 
   //
   //
@@ -212,27 +233,30 @@ module consensus {
   // auxiliary functions for actions below
   //
 
-  pure def notarizedBlocks(msgs: Set[NetWorkMsg]): Set[{ slot: Slot, hash: Blockhash }] =
-    msgs.fold(Set(), (s, x) => match x.msg {
-                            | NotarVoteMsg(m) => s.union(Set(m))
-                            | _ => s
-                          })
-                .filter(t => notarizationCertified(t.slot, t.hash, msgs))
+  pure def notarizedBlocks(msgs: Set[NetWorkMsg]): Set[BlockReference] =
+    msgs
+      .fold(Set(), (s, x) => match x.msg {
+        | NotarVoteMsg(m) => s.union(Set(m))
+        | _ => s
+      })
+      .filter(b => isCertified(NotarizationCertificate(b), msgs))
 
-  pure def notarFallbackBlocks(msgs: Set[NetWorkMsg]): Set[{ slot: Slot, hash: Blockhash }] =
-    msgs.fold(Set(), (s, x) => match x.msg {
-                            | NotarVoteMsg(m) => s.union(Set(m))
-                            | NotarFallBackVoteMsg(m) => s.union(Set(m))
-                            | _ => s
-                          })
-                .filter(t => notarFallbackCertified(t.slot, t.hash, msgs))
+  pure def notarFallbackBlocks(msgs: Set[NetWorkMsg]): Set[BlockReference] =
+    msgs
+      .fold(Set(), (s, x) => match x.msg {
+        | NotarVoteMsg(m) => s.union(Set(m))
+        | NotarFallBackVoteMsg(m) => s.union(Set(m))
+        | _ => s
+      })
+      .filter(b => isCertified(NotarFallbackCertificate(b), msgs))
 
   pure def slotsSkipCertified(msgs: Set[NetWorkMsg]): Set[Slot] =
-    msgs.fold(Set(), (s, x) => match x.msg {
-                            | SkipVoteMsg(m) => s.union(Set(m))
-                            | _ => s
-                          })
-                .filter(t => skipCertified(t, msgs))
+    msgs
+      .fold(Set(), (s, x) => match x.msg {
+        | SkipVoteMsg(m) => s.union(Set(m))
+        | _ => s
+      })
+      .filter(s => isCertified(SkipCertificate(s), msgs))
 
   action processInput(id: ProcessID, input: ConsensusInput): bool = {
     s' = applyEffect(s, id, consensus(s.system.get(id), input))
@@ -243,7 +267,7 @@ module consensus {
 
   // • BlockNotarized(slot(b), hash(b)): Pool holds a notarization certificate for
   // block b.
-  def notarizedBlocksCondition(v: ProcessID, now: Slot, b: { slot: Slot, hash: Blockhash }): bool =
+  def notarizedBlocksCondition(v: ProcessID, now: Slot, b: BlockReference): bool =
     notarizedBlocks(allMessages).contains(b)
 
   /// Emit BlockNotarized and process it. The structure of this actions is that we first
@@ -270,8 +294,8 @@ module consensus {
       and {
         b.slot < slot, // previous block
         or {
-          notarizationCertified(b.slot, b.hash, msgs),
-          notarFallbackCertified(b.slot, b.hash, msgs)
+          isCertified(NotarizationCertificate(b), msgs),
+          isCertified(NotarFallbackCertificate(b), msgs)
         },
         b.slot.to(slot).subseteq(slotsSkipCertified(msgs))
     })
@@ -342,30 +366,37 @@ module consensus {
   // • SafeToSkip(s): The event is only issued if the node voted in slot s already,
   // but not to skip s.
   def safeToSkipCondition(v: ProcessID, now: Slot): bool = all {
-    allMessages.filter(m => m.sender == v and now == m.msg.slotOf())
-                .filter(m => match m.msg {
-                          | SkipVoteMsg(s) => false
-                          | _ => true
-                          })
-                .size() > 0,
+    allMessages
+      .filter(m => m.sender == v and slotOf(m.msg) == now)
+      .filter(m => match m.msg {
+        | SkipVoteMsg(s) => false
+        | _ => true
+      })
+      .size() > 0,
+
     val blocksWithNotarVotes =
-      allMessages.filter(m => slotOf(m.msg) == now)
+      allMessages
+        .filter(m => slotOf(m.msg) == now)
         .map(m => m.msg)
         .fold(Set(), (s, m) => match m {
-          | NotarVoteMsg(n) => s.union(Set(n))
+          | NotarVoteMsg(n) => s.setAdd(n)
           | _ => s
-        }
-      )
-    val maxNotar = blocksWithNotarVotes.fold({slot: -1, hash: -1}, (res, x) =>
-      if (votedToNotarPair(x.slot, x.hash, allMessages).size() > votedToNotarPair(res.slot, res.hash, allMessages).size())
+        })
+
+    val maxNotar = blocksWithNotarVotes.fold({ slot: -1, hash: -1 }, (res, x) => {
+      if (votedToNotarPair(x.slot, x.hash, allMessages).size()
+          > votedToNotarPair(res.slot, res.hash, allMessages).size())
         x
       else
-        res)
+        res
+    })
+
     val sumNotar = blocksWithNotarVotes.map(m => m.hash).fold(Set(), (res, x) =>
       res.union(votedToNotarPair(now, x, allMessages)))
+
     // TODO: check and rewrite with surpassesThreshold, if possible
     (votedToSkip(now, allMessages).union(sumNotar).size() -
-    votedToNotarPair(maxNotar.slot, maxNotar.hash, allMessages).size()) * 100 >= 40
+      votedToNotarPair(maxNotar.slot, maxNotar.hash, allMessages).size()) * 100 >= 40
   }
 
   // Emit SafeToSkip and process it
@@ -374,12 +405,13 @@ module consensus {
     v.processInput(SafeToSkipCI(now)),
   }
 
-  /// any upon that is triggered by messages
+  /// Any upon that is triggered by messages
   action messageResponse =
     nondet v = oneOf(benevolent)
+    // we pass the global time here, but we might also model that a validator is ahead / behind time
     any {
       receiveBlock(v, s.now),
-      blockNotarizedAction(v, s.now), // we pass the global time here, but we might also model that a validator is ahead / behind time
+      blockNotarizedAction(v, s.now),
       parentReadyAction(v, s.now),
       safeToNotarAction(v, s.now),
       safeToSkipAction(v, s.now),
@@ -399,23 +431,22 @@ module consensus {
     tick,
   }
 
-  /// no timeout ever expires
+  /// Alternative step action. With this, no timeout ever expires
   action noTimeout = any {
     messageResponse,
     tick,
   }
 
-  /// never tick (leave slot 0)
+  /// Alternative step action. With this, we never tick (leave slot 0)
   action oneSlot = any {
     messageResponse,
     nondet v = oneOf(benevolent)
     fireTimeoutEvent(v, s.now),
   }
 
-  /// slot 0 never expires nor any process times out
+  /// Alternative step action. With this, no timeout ever expires and we never tick
   action oneSlotNoTimeout =
     messageResponse
-
 
   //
   //
@@ -436,7 +467,7 @@ module consensus {
 
   /// Witness to find a run where a block is fast finalized
   val fastFinalizedWitness =
-    allBlocks.forall(b => not(fastFinalizationCertified(b.slot, b.hash, allMessages)))
+    allBlocks.forall(b => not(isCertified(FastFinalizationCertificate(b.reference()), allMessages)))
 
   val slots = 0.to(s.now)
 
