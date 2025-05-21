@@ -57,7 +57,7 @@ module consensus {
 
   /// Messages on the network carry the sender (the broadcast call in the pseudo code
   /// doesn't carry the sender, so does our encoding of the consensus main loop)
-  type NetWorkMsg = {
+  type NetworkMsg = {
     sender: ProcessID,
     msg: Message,
   }
@@ -100,7 +100,7 @@ module consensus {
     // Global time, we can push to different views of slots later
     now: Slot,
     // Messages sent so far, a.k.a. the message soup
-    msgBuffer: Set[NetWorkMsg],
+    msgBuffer: Set[NetworkMsg],
     // Started timeouts per process
     activeTimeouts: ProcessID -> Set[TimeoutEventData],
   }
@@ -131,7 +131,7 @@ module consensus {
     | FinalizationCertificate(Slot)
 
   /// Table 5: Apenglow's certificate messages.
-  pure def isCertified(cert: Certificate, msgs: Set[NetWorkMsg]): bool = {
+  pure def isCertified(cert: Certificate, msgs: Set[NetworkMsg]): bool = {
     pure val aggregatedVotes = msgs.filter(m => {
       match cert {
         | FastFinalizationCertificate(b) =>
@@ -163,7 +163,7 @@ module consensus {
 
   /// If a finalization certificate on slot s is in Pool, the unique notarized block
   /// in slot s is finalized (we call this slow-finalized).
-  pure def finalized(slot: Slot, msgs: Set[NetWorkMsg]): Set[Blockhash] =
+  pure def finalized(slot: Slot, msgs: Set[NetworkMsg]): Set[Blockhash] =
     notarizedBlocks(msgs) // we derive the blocks from the votes in msgs here
       .filter(b => b.slot == slot)
       .filter(b => {
@@ -174,7 +174,7 @@ module consensus {
 
   /// If a fast-finalization certificate on block b is in Pool, the block b is
   /// finalized (fast-finalized).
-  pure def fastFinalized(slot: Slot, msgs: Set[NetWorkMsg]): Set[Blockhash] =
+  pure def fastFinalized(slot: Slot, msgs: Set[NetworkMsg]): Set[Blockhash] =
     notarizedBlocks(msgs)
       .filter(b => b.slot == slot)
       .filter(b => isCertified(FastFinalizationCertificate(b), msgs))
@@ -233,7 +233,7 @@ module consensus {
   // auxiliary functions for actions below
   //
 
-  pure def notarizedBlocks(msgs: Set[NetWorkMsg]): Set[BlockReference] =
+  pure def notarizedBlocks(msgs: Set[NetworkMsg]): Set[BlockReference] =
     msgs
       .fold(Set(), (s, x) => match x.msg {
         | NotarVoteMsg(m) => s.union(Set(m))
@@ -241,7 +241,7 @@ module consensus {
       })
       .filter(b => isCertified(NotarizationCertificate(b), msgs))
 
-  pure def notarFallbackBlocks(msgs: Set[NetWorkMsg]): Set[BlockReference] =
+  pure def notarFallbackBlocks(msgs: Set[NetworkMsg]): Set[BlockReference] =
     msgs
       .fold(Set(), (s, x) => match x.msg {
         | NotarVoteMsg(m) => s.union(Set(m))
@@ -250,7 +250,7 @@ module consensus {
       })
       .filter(b => isCertified(NotarFallbackCertificate(b), msgs))
 
-  pure def slotsSkipCertified(msgs: Set[NetWorkMsg]): Set[Slot] =
+  pure def slotsSkipCertified(msgs: Set[NetworkMsg]): Set[Slot] =
     msgs
       .fold(Set(), (s, x) => match x.msg {
         | SkipVoteMsg(m) => s.union(Set(m))
@@ -287,7 +287,7 @@ module consensus {
   //
   // Warning "notarization or notar-fallback": notar-fallback seems to imply notar
   // Warning: Previous block? Block for previous slot
-  pure def parentReadyCondition(slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): bool = all {
+  pure def parentReadyCondition(slot: Slot, hash: Blockhash, msgs: Set[NetworkMsg]): bool = all {
     firstSlotInLeaderWindow(slot),
     val pool = notarizedBlocks(msgs).filter(t => t.hash == hash and t.slot == slot)
     pool.exists(b =>
@@ -312,20 +312,20 @@ module consensus {
 
   /// Definition 16 (fallback events)
 
-  pure def votedToSkip(s: Slot, msgs: Set[NetWorkMsg]): Set[ProcessID] =
+  pure def votedToSkip(s: Slot, msgs: Set[NetworkMsg]): Set[ProcessID] =
     msgs.filter(m => match m.msg {
       | SkipVoteMsg(slot) => slot == s
       | _ => false
     }).map(m => m.sender)
 
-  pure def votedToNotarPair(slot: Slot, hash: Blockhash, msgs: Set[NetWorkMsg]): Set[ProcessID] =
+  pure def votedToNotarPair(slot: Slot, hash: Blockhash, msgs: Set[NetworkMsg]): Set[ProcessID] =
     msgs.filter(m => match m.msg {
       | NotarVoteMsg(x) => x.slot == slot and x.hash == hash
       | _ => false
     }).map(m => m.sender)
 
   // Warning: vote doesn't contain parent. Assumption about parent hashed in hash?
-  pure def votedToNotar(b: Block, msgs: Set[NetWorkMsg]): Set[ProcessID] =
+  pure def votedToNotar(b: Block, msgs: Set[NetworkMsg]): Set[ProcessID] =
     votedToNotarPair(b.slot, b.hash, msgs)
 
   // • SafeToNotar(s, hash(b)): The event is only issued if the node voted in
