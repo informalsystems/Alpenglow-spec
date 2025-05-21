@@ -214,19 +214,19 @@ module consensus {
 
   /// Emit Block and process it
   /// Warning: The pseudo code uses s. Does this mean s is checked against the local
-  /// view of the slot, and thus only "current" blocks can be received, or could BlockCI(block)
+  /// view of the slot, and thus only "current" blocks can be received, or could BlockInput(block)
   /// could also be executed for blocks from future slots?
   /// This question applies to all "upon"s
   action receiveBlock(v: ProcessID, now: Slot): bool = all{
     nondet block = allBlocks.filter(b => b.slot == now).oneOf()
-    v.processInput(BlockCI(block))
+    v.processInput(BlockInput(block))
   }
 
   /// Fire timeout for current slot
   action fireTimeoutEvent(v: ProcessID, now: Slot): bool = all {
     s.activeTimeouts.get(v).contains(now),
     val s2 = { ...s, activeTimeouts: s.activeTimeouts.set(v, s.activeTimeouts.get(v).exclude(Set(now))) }
-    s' = applyEffect(s2, v, consensus(s2.system.get(v), TimeOutCI(now)))
+    s' = applyEffect(s2, v, consensus(s2.system.get(v), TimeOutInput(now)))
   }
 
   //
@@ -278,7 +278,7 @@ module consensus {
     all {
       bs.size() > 0,
       nondet b = bs.oneOf()
-      v.processInput(BlockNotarizedCI({ slot: b.slot, hash: b.hash }))
+      v.processInput(BlockNotarizedInput({ slot: b.slot, hash: b.hash }))
     }
 
   // • ParentReady(s, hash(b)): Slot s is the first of its leader window, and Pool
@@ -307,7 +307,7 @@ module consensus {
     all {
       bs.size() > 0,
       nondet b = bs.oneOf()
-      v.processInput(ParentReadyCI({slot: now, hash: b.hash}))
+      v.processInput(ParentReadyInput({slot: now, hash: b.hash}))
     }
 
   /// Definition 16 (fallback events)
@@ -360,7 +360,7 @@ module consensus {
     all {
       bs.size() > 0,
       nondet b = bs.oneOf()
-      v.processInput(SafeToNotarCI({ slot: b.slot, hash: b.hash })),
+      v.processInput(SafeToNotarInput({ slot: b.slot, hash: b.hash })),
     }
 
   // • SafeToSkip(s): The event is only issued if the node voted in slot s already,
@@ -402,7 +402,7 @@ module consensus {
   // Emit SafeToSkip and process it
   action safeToSkipAction(v: ProcessID, now: Slot): bool = all {
     safeToSkipCondition(v, now),
-    v.processInput(SafeToSkipCI(now)),
+    v.processInput(SafeToSkipInput(now)),
   }
 
   /// Any upon that is triggered by messages

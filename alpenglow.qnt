@@ -39,12 +39,12 @@ module alpenglow {
     | BadWindow
 
   type ConsensusInput =
-    | BlockCI(Block)
-    | TimeOutCI(Slot)
-    | BlockNotarizedCI(BlockReference)
-    | ParentReadyCI(BlockReference)
-    | SafeToNotarCI(BlockReference)
-    | SafeToSkipCI(Slot)
+    | BlockInput(Block)
+    | TimeOutInput(Slot)
+    | BlockNotarizedInput(BlockReference)
+    | ParentReadyInput(BlockReference)
+    | SafeToNotarInput(BlockReference)
+    | SafeToSkipInput(Slot)
 
   /// Table 4 (Alpenglow’s voting messages)
   type Message =
@@ -171,9 +171,9 @@ module alpenglow {
 
   /// Algorithm 1: each upon corresponds to one consensus input
   // Warning: Block vs. Blockevent a bit unclear
-  pure def consensus(ls: LocalState, ci: ConsensusInput): Result =
-    match ci {
-      | BlockCI(b) =>
+  pure def consensus(ls: LocalState, input: ConsensusInput): Result =
+    match input {
+      | BlockInput(b) =>
         val tn = tryNotar(ls, b) // looks like a function but has two side effects: changes state and broadcasts
         if (tn.success)
           val cpb = checkPendingBlocks(tn.result.post)
@@ -187,25 +187,25 @@ module alpenglow {
           // Even if all if conditions evaluate to false, tryNotar may have side effects and may change the local state
           { output: tn.result.output, post: tn.result.post } // Warning: The state might have changed
 
-      | TimeOutCI(slot) =>
+      | TimeOutInput(slot) =>
         if (Voted.in(ls.state[slot]))
           trySkipWindow(ls, slot)
         else
           // No change state, no messages sent
           { output: Set(), post: ls }
 
-      | BlockNotarizedCI(sh) =>
+      | BlockNotarizedInput(sh) =>
         val s = ls.addObjects(sh.slot, Set(BlockNotarized(sh.hash)))
         tryFinal(s, sh.slot, sh.hash)
 
-      | ParentReadyCI(sh) =>
+      | ParentReadyInput(sh) =>
         val s = ls.addObjects(sh.slot, Set(ParentReady(sh.hash)))
         val s1 = checkPendingBlocks(s)
         // Start time for all slots in this window
         val s2 = setTimeouts(s1.post, sh.slot)
         { output: s1.output.union(s2.output), post: s2.post }
 
-      | SafeToNotarCI(sh) =>
+      | SafeToNotarInput(sh) =>
         val s = trySkipWindow(ls, sh.slot)
         if (not(ItsOver.in(s.post.state[sh.slot])))
           // Notar-fallback vote
@@ -214,7 +214,7 @@ module alpenglow {
         else
           s
 
-      | SafeToSkipCI(slot) =>
+      | SafeToSkipInput(slot) =>
         val s = trySkipWindow(ls, slot)
         if (not(ItsOver.in(s.post.state[slot])))
           // Skip-fallback vote
