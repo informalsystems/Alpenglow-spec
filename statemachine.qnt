@@ -289,7 +289,7 @@ module consensus {
   // Warning: Previous block? Block for previous slot
   pure def parentReadyCondition(slot: Slot, hash: Blockhash, msgs: Set[NetworkMsg]): bool = all {
     firstSlotInLeaderWindow(slot),
-    val pool = notarizedBlocks(msgs).filter(t => t.hash == hash and t.slot == slot)
+    val pool = notarizedBlocks(msgs).filter(b => b.hash == hash and b.slot == slot)
     pool.exists(b =>
       and {
         b.slot < slot, // previous block
@@ -313,35 +313,28 @@ module consensus {
   /// Definition 16 (fallback events)
 
   pure def votedToSkip(s: Slot, msgs: Set[NetworkMsg]): Set[ProcessID] =
-    msgs.filter(m => match m.msg {
-      | SkipVoteMsg(slot) => slot == s
-      | _ => false
-    }).map(m => m.sender)
-
-  pure def votedToNotarPair(slot: Slot, hash: Blockhash, msgs: Set[NetworkMsg]): Set[ProcessID] =
-    msgs.filter(m => match m.msg {
-      | NotarVoteMsg(x) => x.slot == slot and x.hash == hash
-      | _ => false
-    }).map(m => m.sender)
+    msgs.filter(m =>  m.msg == SkipVoteMsg(s)).map(m => m.sender)
 
   // Warning: vote doesn't contain parent. Assumption about parent hashed in hash?
-  pure def votedToNotar(b: Block, msgs: Set[NetworkMsg]): Set[ProcessID] =
-    votedToNotarPair(b.slot, b.hash, msgs)
+  pure def votedToNotar(b: BlockReference, msgs: Set[NetworkMsg]): Set[ProcessID] =
+    msgs.filter(m => m.msg == NotarVoteMsg(b)).map(m => m.sender)
 
   // • SafeToNotar(s, hash(b)): The event is only issued if the node voted in
   // slot s already, but not to notarize b.
   def safeToNotarCondition(v: ProcessID, now: Slot, b: Block): bool = all {
-    val voted = allMessages.filter(m => m.sender == v and now == m.msg.slotOf())
-    val notarVoted = voted.filter(m => match m.msg {
-                          | NotarVoteMsg(m) => true
-                          | _ => false
-                })
+    val voted = allMessages.filter(m => m.sender == v and now == slotOf(m.msg))
+    val notarVoted =
+      voted.filter(m => match m.msg {
+        | NotarVoteMsg(m) => true
+        | _ => false
+      })
+
     and {
       voted.size() > 0,
       notarVoted.size() == 0,
     },
     allBlocks.filter(b => b.slot == now).contains(b),
-    val notar = votedToNotar(b, allMessages)
+    val notar = votedToNotar(b.reference(), allMessages)
     val skip = votedToSkip(now, allMessages)
     // notar(b) ≥ 40% or (skip(s) + notar(b) ≥ 60% and notar(b) ≥ 20%).
     // Question: is (+) here the sum of the sizes or the size of the union?
@@ -384,19 +377,18 @@ module consensus {
         })
 
     val maxNotar = blocksWithNotarVotes.fold({ slot: -1, hash: -1 }, (res, x) => {
-      if (votedToNotarPair(x.slot, x.hash, allMessages).size()
-          > votedToNotarPair(res.slot, res.hash, allMessages).size())
+      if (votedToNotar(x, allMessages).size() > votedToNotar(res, allMessages).size())
         x
       else
         res
     })
 
     val sumNotar = blocksWithNotarVotes.map(m => m.hash).fold(Set(), (res, x) =>
-      res.union(votedToNotarPair(now, x, allMessages)))
+      res.union(votedToNotar({ slot: now, hash: x }, allMessages)))
 
     // TODO: check and rewrite with surpassesThreshold, if possible
     (votedToSkip(now, allMessages).union(sumNotar).size() -
-      votedToNotarPair(maxNotar.slot, maxNotar.hash, allMessages).size()) * 100 >= 40
+      votedToNotar(maxNotar, allMessages).size()) * 100 >= 40
   }
 
   // Emit SafeToSkip and process it
