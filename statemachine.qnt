@@ -1,5 +1,6 @@
 // -*- mode: Bluespec; -*-
 
+
 module consensus {
   import basicSpells.* from "./basicSpells"
   import alpenglow.* from "./alpenglow"
@@ -20,6 +21,10 @@ module consensus {
 
   /// Set of correct processes (non Byzantine)
   const correct: Set[ProcessID]
+
+  /// Set of processes that follow the algorithm but might fail in a benign way
+  const good: Set[ProcessID]
+
   /// Set of Byzantine processes
   const byzantine: Set[ProcessID]
 
@@ -30,6 +35,8 @@ module consensus {
 
   /// Set of all blocks
   pure val all_blocks = correct_blocks.union(byz_blocks)
+
+  pure val benevolent = correct.union(good)
 
   pure val max_slot = all_blocks.fold(-1, (s, x) =>
     if (x.slot > s)
@@ -43,19 +50,35 @@ module consensus {
   /// Hashes for which this model considers votes
   const alive_hashes: Set[Blockhash]
 
+  //
+  // constraints on the number of processes
+  //
+
+  assume unique_role = and {
+    correct.intersect(byzantine) == Set(),
+    correct.intersect(good) == Set(),
+    good.intersect(byzantine) == Set(),
+  }
+
+  val num_processes = correct.size() + good.size() + byzantine.size()
+
   // Assumption 1
-  assume resilience_condition = correct.size() > byzantine.size() * 4 // N > 5F
+  assume resilience_condition_byz = all {
+    num_processes > byzantine.size() * 5, // N > 5F
+    num_processes > good.size() * 5,
+  }
+
 
   // Assumption 2 on additional crashes: TODO
 
   /// Threshold 20% of votes (not considering voting power)
-  val twenty = correct.union(byzantine).size() * 20
+  val twenty = benevolent.union(byzantine).size() * 20
   /// Threshold 40% of votes (not considering voting power)
-  val forty = correct.union(byzantine).size() * 40
+  val forty = benevolent.union(byzantine).size() * 40
   /// Threshold 60% of votes (not considering voting power)
-  val sixty = correct.union(byzantine).size() * 60
+  val sixty = benevolent.union(byzantine).size() * 60
   /// Threshold 80% of votes (not considering voting power)
-  val eighty = correct.union(byzantine).size() * 80
+  val eighty = benevolent.union(byzantine).size() * 80
 
   pure def surpasses_threshold(votes, threshold) =
     votes.size() * 100 >= threshold
@@ -169,10 +192,10 @@ module consensus {
 
   action init = all {
     s' = {
-      system: correct.mapBy(_ => initial_local_state),
+      system: benevolent.mapBy(_ => initial_local_state),
       now: 0,
       msgBuffer: Set(),
-      activeTimeouts: correct.mapBy(v => Set()),
+      activeTimeouts: benevolent.mapBy(v => Set()),
     }
   }
 
@@ -350,7 +373,7 @@ module consensus {
   }
 
   action message_response = 
-    nondet v = oneOf(correct)
+    nondet v = oneOf(benevolent)
     any {
       receive_block(v, s.now),
       BlockNotarizedAction(v, s.now), // we pass the global time here, but we might also model that a validator is ahead / behind time
@@ -367,7 +390,7 @@ module consensus {
 
   action step = any {
     message_response,
-    nondet v = oneOf(correct)
+    nondet v = oneOf(benevolent)
     fire_timeout_event(v, s.now),
     tick,
   }
@@ -381,7 +404,7 @@ module consensus {
   /// never tick (leave slot 0)
   action one_slot = any {
     message_response,
-    nondet v = oneOf(correct)
+    nondet v = oneOf(benevolent)
     fire_timeout_event(v, s.now),
   }
 
@@ -404,7 +427,7 @@ module consensus {
 
   // Witness was used to find bug in safeToNotar encoding
   val nobad =
-    correct.forall(v =>
+    benevolent.forall(v =>
     not(s.system.get(v).state[1].contains(BadWindow)))
 
   /// Witness to find a run where a block is fast finalized
@@ -426,26 +449,38 @@ module consensus {
 }
 
 module only_correct {
+
+  // For a trace where a value is fast finalized call
+  // quint run statemachine.qnt --main only_correct --invariant fast_finalized_witness   
+
   import consensus(
+    correct = Set("v1", "v2", "v3", "v4", "v5"),
+    good = Set(),
+    byzantine = Set(),
     correct_blocks = Set( {slot: 0, hash: 42, parent: -1}, 
                   {slot: 1, hash: 43, parent: 42}, 
                   {slot: 2, hash: 44, parent: 43}, 
                   {slot: 3, hash: 45, parent: 44}),
     byz_blocks = Set(),
-    alive_slots = 0.to(4),
+    alive_slots = 0.to(3),
     alive_hashes = 42.to(50),
-    correct = Set("v1", "v2", "v3", "v4", "v5"),
-    byzantine = Set(),
   ).* 
 }
 
 module some_byz {
+
+  // For a trace where a value is fast finalized call
+  // quint run statemachine.qnt --main some_byz --invariant fast_finalized_witness  
+
   import consensus(
+    correct = Set("v1", "v2", "v3", "v4", "v5"),
+    good = Set(),
+    byzantine = Set("b1"),
     correct_blocks = Set( {slot: 0, hash: 42, parent: -1}, 
                   {slot: 1, hash: 43, parent: 42}, 
                   {slot: 2, hash: 44, parent: 43}, 
     ),
-    byz_blocks = Set( {slot: 0, hash: 45, parent: -1},
+    byz_blocks = Set( 
                   {slot: 1, hash: 46, parent: 42}, 
                   {slot: 1, hash: 47, parent: 45}, 
                   {slot: 2, hash: 48, parent: 43}, 
@@ -453,8 +488,6 @@ module some_byz {
     ),
     alive_slots = 0.to(2),
     alive_hashes = 42.to(49),
-    correct = Set("v1", "v2", "v3", "v4", "v5"),
-    byzantine = Set("b1"),
   ).* 
 }
 
@@ -464,6 +497,9 @@ module too_many_byz_1 {
   // quint run statemachine.qnt --main too_many_byz_1 --step one_slot_no_timeout  --invariant agreement       
 
   import consensus(
+    correct = Set("v1", "v2", "v3", "v4"),
+    good = Set(),
+    byzantine = Set("b1"),
     correct_blocks = Set( {slot: 0, hash: 42, parent: -1}, 
                   {slot: 1, hash: 43, parent: 42}, 
                   {slot: 2, hash: 44, parent: 43}, 
@@ -476,8 +512,6 @@ module too_many_byz_1 {
     ),
     alive_slots = 0.to(2),
     alive_hashes = 42.to(49),
-    correct = Set("v1", "v2", "v3", "v4"),
-    byzantine = Set("b1"),
   ).* 
 }
 
@@ -487,11 +521,12 @@ module too_many_byz {
   // quint run statemachine.qnt --main too_many_byz --step one_slot_no_timeout  --invariant agreement       
 
   import consensus(
-    correct_blocks = Set( {slot: 0, hash: 42, parent: -1}, ),
     correct = Set("v1", "v2", "v3", "v4"),
-    byz_blocks = Set( {slot: 0, hash: 41, parent: -1}, ),
-    alive_slots = Set(0), // 0.to(4),
-    alive_hashes = 41.to(42),
+    good = Set(),
     byzantine = Set("b1", "b2"),
+    correct_blocks = Set( {slot: 0, hash: 42, parent: -1}, ),
+    byz_blocks = Set( {slot: 0, hash: 41, parent: -1}, ),
+    alive_slots = Set(0), 
+    alive_hashes = 41.to(42),
   ).* 
 }
