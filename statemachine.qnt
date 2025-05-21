@@ -265,7 +265,9 @@ module consensus {
   def NotarizedBlocksCondition(v: ProcessID, now: Slot, b: { slot: Slot, hash: Blockhash }): bool =
     NotarizedBlocks(all_messages).contains(b)
 
-  // Emit BlockNotarized and process it
+  /// Emit BlockNotarized and process it. The structure of this actions is that we first
+  /// build a set of data (blocks or slot numbers) for which a certain event is enabled, 
+  /// and then we pick one non-deterministically, process it, and updated the global state.
   action BlockNotarizedAction(v: ProcessID, now: Slot): bool =
     val bs = all_blocks.filter(b => NotarizedBlocksCondition(v, now, { slot: b.slot, hash: b.hash }))
     all {
@@ -391,6 +393,7 @@ module consensus {
     v.process_input(SafeToSkipCI(now)),
   }
 
+  /// any upon that is triggered by messages
   action message_response = 
     nondet v = oneOf(benevolent)
     any {
@@ -401,12 +404,13 @@ module consensus {
       SafeToSkipAction(v, s.now),
     }
 
-
+  /// increment the global time (slot number)
   action tick = all {
-    s.now < max_slot,
+    s.now < max_slot, // make sure we don't enter a slot for which we don't have a block in the model
     s' = { ... s, now: s.now + 1 }
   }
 
+  /// Main step action. Includes all behavior
   action step = any {
     message_response,
     nondet v = oneOf(benevolent)
