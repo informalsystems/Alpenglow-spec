@@ -35,6 +35,7 @@ module consensus {
   //
 
   var s: Environment
+  var counter: int
 
   /// all the messages that could be received, i.e., the ones sent by benevolent processes
   /// and the ones that byzantine processes may send. We use this in the actions to allow
@@ -43,6 +44,7 @@ module consensus {
   val allMessages = s.msgBuffer.union(byzNetworkMsgs)
 
   action init = all {
+    counter' = 0,
     s' = {
       system: benevolent.mapBy(_ => {
         state: [
@@ -259,11 +261,15 @@ module consensus {
   }
 
   /// Main step action. Includes all behavior
-  action step = any {
-    messageResponse,
-    nondet v = oneOf(benevolent)
-    fireTimeoutEvent(v, s.now),
-    tick,
+  action step = all {
+    counter < 10,
+    counter' = counter + 1,
+    any {
+      messageResponse,
+      nondet v = oneOf(benevolent)
+      fireTimeoutEvent(v, s.now),
+      tick,
+    }
   }
 
   /// Alternative step action. With this, no timeout ever expires
