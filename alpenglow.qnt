@@ -200,16 +200,21 @@ module alpenglow {
   // block that can be reached from b by the parent links, i.e., b, b’s parent,
   // b’s parent’s parent, and so on. If b′ is an ancestor of b, b is a
   // descendant of b′ . Note that b is its own ancestor and descendant.
-  pure def isDescendant(a: Block, b: Block): bool =
+  pure def isDescendant(a: Block, b: Block): bool = {
     // TODO: this can have better performance if we can make assumptions about slots
-    allBlocks.fold(Set(b.hash), (s, x) =>
-      allBlocks.fold(s, (s, x) =>
-        if (s.exists(hash => x.parent == hash))
-          s.union(Set(x.parent))
-        else
-          s
+    // Filter by minimal slot
+    // The slot of the parent will always be smaller then that of the child
+    // but its not in increments of 1 like in mysticeti
+    pure val bAncestors = (b.slot.to(a.slot)).fold(Set(b.hash), (path, s) =>
+      pure val potentialAncestors = allBlocks.filter(block => block.slot == s)
+      pure val ancestors = potentialAncestors.filter(ancestor =>
+        path.exists(h => ancestor.parent == h)
       )
-    ).contains(a.hash)
+      path.union(ancestors.map(block => block.hash))
+    )
+
+    bAncestors.contains(a.hash)
+  }
 
   // Definition 13 (certificates)
   // They are defined over a set of messages. Currently we evaluate this over the
@@ -250,7 +255,7 @@ module alpenglow {
   /// If a finalization certificate on slot s is in Pool, the unique notarized block
   /// in slot s is finalized (we call this slow-finalized).
   pure def finalized(slot: Slot, msgs: Set[NetworkMsg]): Set[Blockhash] =
-    notarizedBlocks(msgs) // we derive the blocks from the votes in msgs here
+    allBlocks.map(b => b.reference())
       .filter(b => b.slot == slot)
       .filter(b => {
         isCertified(FinalizationCertificate(b.slot), msgs)
@@ -261,7 +266,7 @@ module alpenglow {
   /// If a fast-finalization certificate on block b is in Pool, the block b is
   /// finalized (fast-finalized).
   pure def fastFinalized(slot: Slot, msgs: Set[NetworkMsg]): Set[Blockhash] =
-    notarizedBlocks(msgs)
+    allBlocks.map(b => b.reference())
       .filter(b => b.slot == slot)
       .filter(b => isCertified(FastFinalizationCertificate(b), msgs))
       .map(b => b.hash)

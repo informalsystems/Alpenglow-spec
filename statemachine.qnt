@@ -91,14 +91,16 @@ module consensus {
 
   // • BlockNotarized(slot(b), hash(b)): Pool holds a notarization certificate for
   // block b.
-  def notarizedBlocksCondition(v: ProcessID, now: Slot, b: BlockReference): bool =
-    notarizedBlocks(allMessages).contains(b)
+  def notarizedBlocksCondition(v: ProcessID, b: BlockReference): bool =
+    isCertified(NotarizationCertificate(b), allMessages)
 
   /// Emit BlockNotarized and process it. The structure of this actions is that we first
   /// build a set of data (blocks or slot numbers) for which a certain event is enabled,
   /// and then we pick one non-deterministically, process it, and updated the global state.
   action blockNotarizedAction(v: ProcessID, now: Slot): bool =
-    val bs = allBlocks.filter(b => notarizedBlocksCondition(v, now, { slot: b.slot, hash: b.hash }))
+    val bs = allBlocks.filter(b =>
+      notarizedBlocksCondition(v, { slot: now, hash: b.hash })
+    )
     all {
       bs.size() > 0,
       nondet b = bs.oneOf()
@@ -113,16 +115,16 @@ module consensus {
   // Warning: Previous block? Block for previous slot
   pure def parentReadyCondition(slot: Slot, hash: Blockhash, msgs: Set[NetworkMsg]): bool = all {
     firstSlotInLeaderWindow(slot),
-    val pool = notarizedBlocks(msgs).filter(b => b.hash == hash and b.slot == slot)
-    pool.exists(b =>
+    0.to(slot - 1).exists(s =>
+      val b = { slot: s, hash: hash }
       and {
-        b.slot < slot, // previous block
         or {
           isCertified(NotarizationCertificate(b), msgs),
           isCertified(NotarFallbackCertificate(b), msgs)
         },
         b.slot.to(slot).subseteq(slotsSkipCertified(msgs))
-    })
+      }
+    )
   }
 
   /// Emit ParentReady and process it
@@ -146,6 +148,9 @@ module consensus {
   // • SafeToNotar(s, hash(b)): The event is only issued if the node voted in
   // slot s already, but not to notarize b.
   def safeToNotarCondition(v: ProcessID, now: Slot, b: Block): bool = all {
+    // Consider block b in slot s = slot(b).
+    b.slot == now,
+
     val voted = allMessages.filter(m => m.sender == v and now == slotOf(m.msg))
     val notarVoted =
       voted.filter(m => match m.msg {
@@ -157,7 +162,6 @@ module consensus {
       voted.size() > 0,
       notarVoted.size() == 0,
     },
-    allBlocks.filter(b => b.slot == now).contains(b),
     val notar = votedToNotar(b.reference(), allMessages)
     val skip = votedToSkip(now, allMessages)
     // notar(b) ≥ 40% or (skip(s) + notar(b) ≥ 60% and notar(b) ≥ 20%).
@@ -183,14 +187,15 @@ module consensus {
   // • SafeToSkip(s): The event is only issued if the node voted in slot s already,
   // but not to skip s.
   def safeToSkipCondition(v: ProcessID, now: Slot): bool = all {
-    allMessages
-      .filter(m => m.sender == v and slotOf(m.msg) == now)
-      .filter(m => match m.msg {
-        | SkipVoteMsg(s) => false
-        | _ => true
-      })
-      .size() > 0,
+    // node voted in slot s already, but not to skip s.
+    allMessages.exists(m =>
+      m.sender == v
+      and slotOf(m.msg) == now
+      and m.msg != SkipVoteMsg(now)
+    ),
 
+    // Moreover:
+    // skip(s) + Σ_b notar(b) − max_b notar(b) ≥ 40%.
     val blocksWithNotarVotes =
       allMessages
         .filter(m => slotOf(m.msg) == now)
@@ -199,19 +204,31 @@ module consensus {
           | _ => s
         })
 
-    val maxNotar = blocksWithNotarVotes.fold({ slot: -1, hash: -1 }, (res, x) => {
+    // Σ_b notar(b)
+    val allNotarVotes = blocksWithNotarVotes.map(b =>
+      votedToNotar(b, allMessages)
+    ).flatten()
+
+    // max_b
+    val blockWithMostVotes = blocksWithNotarVotes.fold({ slot: -1, hash: -1 }, (res, x) => {
       if (votedToNotar(x, allMessages).size() > votedToNotar(res, allMessages).size())
         x
       else
         res
     })
 
-    val sumNotar = blocksWithNotarVotes.fold(Set(), (res, b) =>
-      res.union(votedToNotar(b, allMessages)))
+    // skip(s) + Σ_b notar(b) − max_b notar(b) ≥ 40%.
+    // Question: is (+) here the sum of the sizes or the size of the union?
+    // same for (-)
 
-    votedToSkip(now, allMessages).union(sumNotar).exclude(
-      votedToNotar(maxNotar, allMessages)
-    ).surpassesThreshold(40)
+    // skip(s)
+    votedToSkip(now, allMessages)
+      // + Σ_b notar(b)
+      .union(allNotarVotes)
+      // - max_b notar(b)
+      .exclude(votedToNotar(blockWithMostVotes, allMessages))
+      // ≥ 40%.
+      .surpassesThreshold(40)
   }
 
   // Emit SafeToSkip and process it
@@ -223,8 +240,11 @@ module consensus {
   /// Any upon that is triggered by messages
   action messageResponse =
     nondet v = oneOf(benevolent)
-    // we pass the global time here, but we might also model that a validator is ahead / behind time
+    // we pass the global time here, but we might also model that a validator is
+    // ahead / behind time
     any {
+      // Question: Are all of these fired only for now or can they also be fired
+      // for future/past slots?
       receiveBlock(v, s.now),
       blockNotarizedAction(v, s.now),
       parentReadyAction(v, s.now),
