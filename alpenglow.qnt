@@ -368,7 +368,7 @@ module alpenglow {
           { output: tn.result.output, post: tn.result.post } // Warning: The state might have changed
 
       | TimeOutInput(slot) =>
-        if (Voted.in(ls.state[slot]))
+        if (not(Voted.in(ls.state[slot])))
           trySkipWindow(ls, slot)
         else
           // No change state, no messages sent

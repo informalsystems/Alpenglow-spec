@@ -3,6 +3,7 @@
 module consensus {
   import basicSpells.* from "./basicSpells"
   import alpenglow.* from "./alpenglow"
+  export alpenglow.*
 
   /// This is all the information of the global state
   type Environment = {
@@ -35,7 +36,7 @@ module consensus {
   //
 
   var s: Environment
-  var counter: int
+//  var counter: int // Required for TLC
 
   /// all the messages that could be received, i.e., the ones sent by benevolent processes
   /// and the ones that byzantine processes may send. We use this in the actions to allow
@@ -44,7 +45,7 @@ module consensus {
   val allMessages = s.msgBuffer.union(byzNetworkMsgs)
 
   action init = all {
-    counter' = 0,
+  //  counter' = 0,
     s' = {
       system: benevolent.mapBy(_ => {
         state: [
@@ -262,8 +263,8 @@ module consensus {
 
   /// Main step action. Includes all behavior
   action step = all {
-    counter < 10,
-    counter' = counter + 1,
+  //  counter < 10,
+  //  counter' = counter + 1,
     any {
       messageResponse,
       nondet v = oneOf(benevolent)
@@ -326,7 +327,8 @@ module consensus {
 module some_byz {
   // For a trace where a value is fast finalized call
   // quint run statemachine.qnt --main some_byz --invariant fastFinalizedWitness
-
+  // Same but one process reached ItsOver
+  // quint run statemachine.qnt --main some_byz --invariant fastFinalizedWitness  --seed=0x11fa3a6ddd2666   
   import consensus(
     correct = Set("v1", "v2", "v3", "v4", "v5"),
     good = Set(),
@@ -345,6 +347,15 @@ module some_byz {
     aliveSlots = 0.to(2),
     aliveHashes = 42.to(49),
   ).*
+
+  run ff =
+    init
+    .then(processInput("v1", BlockInput({ hash: 42, parent: -1, slot: 0 })))
+    .then(processInput("v2", BlockInput({ hash: 42, parent: -1, slot: 0 })))
+    .then(processInput("v3", BlockInput({ hash: 42, parent: -1, slot: 0 })))
+    .then(processInput("v4", BlockInput({ hash: 42, parent: -1, slot: 0 })))
+    .expect(fastFinalized(0, allMessages) == Set(42))
+
 }
 
 module too_many_byz_1 {
