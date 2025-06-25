@@ -92,6 +92,9 @@ module alpenglow {
   /// Set of Byzantine processes
   const byzantine: Set[ProcessID]
 
+  /// Voting power of the processes
+  const power: ProcessID -> int
+
   /// Set of blocks
   const correctBlocks: Set[Block]
   /// Set of Byzantine blocks
@@ -120,17 +123,20 @@ module alpenglow {
     good.intersect(byzantine) == Set(),
   }
 
-  pure val numProcesses = correct.size() + good.size() + byzantine.size()
+  pure def voting_power(s: Set[ProcessID]): int =
+    s.fold(0, (s, x) => s + power.get(x))
+
+  pure val totalVotingPower = correct.union(good).union(byzantine).voting_power()
 
   // Assumption 1 and Assumption 2
   assume resilienceCondition = all {
-    numProcesses > byzantine.size() * 5, // N > 5F
-    numProcesses > good.size() * 5,
+    totalVotingPower > byzantine.voting_power() * 5, // N > 5F
+    totalVotingPower > good.voting_power() * 5,
   }
 
-  /// Checks for thresholds, using the known number of processes
+  /// Checks for thresholds, using the known total voting power
   pure def surpassesThreshold(votes, threshold) =
-    votes.size() * 100 >= numProcesses * threshold
+    votes.voting_power() * 100 >= totalVotingPower* threshold
 
   /// All votes that can be sent by the Byzantine processes (without senders)
   pure val byzMessages = tuples(aliveSlots, aliveHashes).map(((slot, hash)) =>
@@ -246,7 +252,7 @@ module alpenglow {
       | FinalizationCertificate => 60
     }
 
-    aggregatedVotes.surpassesThreshold(threshold)
+    aggregatedVotes.map(x => x.sender).surpassesThreshold(threshold)
   }
 
   // Definition 14 (finalization). We have two ways to finalize a block:

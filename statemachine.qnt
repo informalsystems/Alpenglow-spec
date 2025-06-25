@@ -9,8 +9,11 @@ module consensus {
   type Environment = {
     // The local state of each process
     system: ProcessID -> LocalState,
+    //powers: ProcessID -> int, TODO
+    
     // Global time, we can push to different views of slots later
-    now: Slot,
+    // now: Slot,
+
     // Messages sent so far, a.k.a. the message soup
     msgBuffer: Set[NetworkMsg],
     // Started timeouts per process
@@ -57,10 +60,15 @@ module consensus {
         ],
         pendingBlocks: [None, None, None, None, None]
       }),
-      now: 0,
+      // now: 0,
       msgBuffer: Set(),
       activeTimeouts: benevolent.mapBy(v => Set()),
     }
+  }
+
+  action receiveSpecificBlock(v: ProcessID, b: Block): bool = all {
+    allBlocks.contains(b),
+    v.processInput(BlockInput(b))
   }
 
   /// Emit Block and process it
@@ -70,7 +78,7 @@ module consensus {
   /// This question applies to all "upon"s
   action receiveBlock(v: ProcessID, now: Slot): bool = all{
     nondet block = allBlocks.filter(b => b.slot == now).oneOf()
-    v.processInput(BlockInput(block))
+    receiveSpecificBlock(v, block)
   }
 
   /// Fire timeout for current slot
@@ -243,23 +251,24 @@ module consensus {
   /// Any upon that is triggered by messages
   action messageResponse =
     nondet v = oneOf(benevolent)
+    nondet slot = oneOf(aliveSlots)
     // we pass the global time here, but we might also model that a validator is
     // ahead / behind time
     any {
       // Question: Are all of these fired only for now or can they also be fired
       // for future/past slots?
-      receiveBlock(v, s.now),
-      blockNotarizedAction(v, s.now),
-      parentReadyAction(v, s.now),
-      safeToNotarAction(v, s.now),
-      safeToSkipAction(v, s.now),
+      receiveBlock(v, slot),
+      blockNotarizedAction(v, slot),
+      parentReadyAction(v, slot),
+      safeToNotarAction(v, slot),
+      safeToSkipAction(v, slot),
     }
 
-  /// increment the global time (slot number)
-  action tick = all {
-    s.now < maxSlot, // make sure we don't enter a slot for which we don't have a block in the model
-    s' = { ... s, now: s.now + 1 }
-  }
+  // /// increment the global time (slot number)
+  // action tick = all {
+  //   s.now < maxSlot, // make sure we don't enter a slot for which we don't have a block in the model
+  //   s' = { ... s, now: s.now + 1 }
+  // }
 
   /// Main step action. Includes all behavior
   action step = all {
@@ -268,22 +277,23 @@ module consensus {
     any {
       messageResponse,
       nondet v = oneOf(benevolent)
-      fireTimeoutEvent(v, s.now),
-      tick,
+      nondet slot = oneOf(aliveSlots)
+      fireTimeoutEvent(v, slot),
+//      tick,
     }
   }
 
   /// Alternative step action. With this, no timeout ever expires
   action noTimeout = any {
     messageResponse,
-    tick,
+  //  tick,
   }
 
   /// Alternative step action. With this, we never tick (leave slot 0)
   action oneSlot = any {
     messageResponse,
     nondet v = oneOf(benevolent)
-    fireTimeoutEvent(v, s.now),
+    fireTimeoutEvent(v, 0),
   }
 
   /// Alternative step action. With this, no timeout ever expires and we never tick
@@ -297,10 +307,10 @@ module consensus {
   //
 
   val agreement =
-    0.to(s.now).forall(slot => finalized(slot, allMessages).size() <= 1)
+    aliveSlots.forall(slot => finalized(slot, allMessages).size() <= 1)
 
   val fastAgreement =
-    0.to(s.now).forall(slot => fastFinalized(slot, allMessages).union(finalized(slot, allMessages)).size() <= 1)
+    aliveSlots.forall(slot => fastFinalized(slot, allMessages).union(finalized(slot, allMessages)).size() <= 1)
 
   // Witness was used to find bug in safeToNotar encoding
   val noBad =
@@ -310,13 +320,13 @@ module consensus {
   val fastFinalizedWitness =
     allBlocks.forall(b => not(isCertified(FastFinalizationCertificate(b.reference()), allMessages)))
 
-  val slots = 0.to(s.now)
 
   /// Theorem 1 (safety). If any correct node finalizes a block b in slot s and any
   /// correct node finalizes any block b′ in any slot s′ ≥ s, b′ is a descendant of b.
-  val safety = tuples(slots, allBlocks).forall(((slot, block)) => {
+  val safety = tuples(aliveSlots, allBlocks).forall(((slot, block)) => {
     val finalizedAtSlot = finalized(slot, allMessages)
-    block.hash.in(finalizedAtSlot) implies tuples(slot.to(s.now), allBlocks).forall(((slot2, block2)) => {
+    block.hash.in(finalizedAtSlot) implies tuples(
+      aliveSlots.filter(s2 => s2 >= slot), allBlocks).forall(((slot2, block2)) => {
       block2.hash.in(finalized(slot2, allMessages)) implies block2.isDescendant(block)
     })
   })
@@ -333,6 +343,7 @@ module some_byz {
     correct = Set("v1", "v2", "v3", "v4", "v5"),
     good = Set(),
     byzantine = Set("b1"),
+    power = Set("v1", "v2", "v3", "v4", "v5", "b1").mapBy(_ => 1), 
     correctBlocks = Set(
       { slot: 0, hash: 42, parent: -1 },
       { slot: 1, hash: 43, parent: 42 },
@@ -348,15 +359,51 @@ module some_byz {
     aliveHashes = 42.to(49),
   ).*
 
-  run ff =
+  run ffTest =
     init
-    .then(processInput("v1", BlockInput({ hash: 42, parent: -1, slot: 0 })))
-    .then(processInput("v2", BlockInput({ hash: 42, parent: -1, slot: 0 })))
-    .then(processInput("v3", BlockInput({ hash: 42, parent: -1, slot: 0 })))
-    .then(processInput("v4", BlockInput({ hash: 42, parent: -1, slot: 0 })))
+    .then(receiveSpecificBlock("v1", { hash: 42, parent: -1, slot: 0 }))
+    .then(receiveSpecificBlock("v2", { hash: 42, parent: -1, slot: 0 }))
+    .then(receiveSpecificBlock("v3", { hash: 42, parent: -1, slot: 0 }))
+    .then(receiveSpecificBlock("v4", { hash: 42, parent: -1, slot: 0 }))
     .expect(fastFinalized(0, allMessages) == Set(42))
 
 }
+
+
+module some_byz_vp {
+  // For a trace where a value is fast finalized call
+  // quint run statemachine.qnt --main some_byz --invariant fastFinalizedWitness
+  // Same but one process reached ItsOver
+  // quint run statemachine.qnt --main some_byz --invariant fastFinalizedWitness  --seed=0x11fa3a6ddd2666   
+  import consensus(
+    correct = Set("v1", "v2"),
+    good = Set(),
+    byzantine = Set("b1"),
+    power = Map("v1" -> 3, "v2" -> 2, "b1"-> 1), 
+    correctBlocks = Set(
+      { slot: 0, hash: 42, parent: -1 },
+      { slot: 1, hash: 43, parent: 42 },
+      { slot: 2, hash: 44, parent: 43 },
+    ),
+    byzantineBlocks = Set(
+      { slot: 1, hash: 46, parent: 42 },
+      { slot: 1, hash: 47, parent: 45 },
+      { slot: 2, hash: 48, parent: 43 },
+      { slot: 2, hash: 49, parent: 45 },
+    ),
+    aliveSlots = 0.to(2),
+    aliveHashes = 42.to(49),
+  ).*
+
+  run ffTest =
+    init
+    .then(receiveSpecificBlock("v1", { hash: 42, parent: -1, slot: 0 }))
+    .then(receiveSpecificBlock("v2", { hash: 42, parent: -1, slot: 0 }))
+    .expect(fastFinalized(0, allMessages) == Set(42))
+
+}
+
+
 
 module too_many_byz_1 {
   // to violate agreement, run
@@ -366,6 +413,7 @@ module too_many_byz_1 {
     correct = Set("v1", "v2", "v3", "v4"),
     good = Set(),
     byzantine = Set("b1"),
+    power = Set("v1", "v2", "v3", "v4", "b1").mapBy(_ => 1), 
     correctBlocks = Set(
       { slot: 0, hash: 42, parent: -1 },
       { slot: 1, hash: 43, parent: 42 },
@@ -391,6 +439,7 @@ module too_many_byz {
     correct = Set("v1", "v2", "v3", "v4"),
     good = Set(),
     byzantine = Set("b1", "b2"),
+    power = Set("v1", "v2", "v3", "v4", "b1", "b2").mapBy(_ => 1), 
     correctBlocks = Set({ slot: 0, hash: 42, parent: -1 }),
     byzantineBlocks = Set({ slot: 0, hash: 41, parent: -1 }),
     aliveSlots = Set(0),
