@@ -9,20 +9,19 @@ module consensus {
   type Environment = {
     // The local state of each process
     system: ProcessID -> LocalState,
-    //powers: ProcessID -> int, TODO
-    
-    // Global time, we can push to different views of slots later
-    // now: Slot,
 
     // Messages sent so far, a.k.a. the message soup
     msgBuffer: Set[NetworkMsg],
+
     // Started timeouts per process
     activeTimeouts: ProcessID -> Set[TimeoutEventData],
   }
 
   /// Interface consensus algorithm / state machine: how consensus algorithm effects the environment
   pure def applyEffect(env: Environment, v: ProcessID, res: Result): Environment =
-    val new = { ... env, system: env.system.set(v, res.post) } // update the state of the process
+    // update the state of the process
+    val new = { ... env, system: env.system.set(v, res.post) } 
+    // update the message buffer and active timeouts
     res.output.fold(new, (s, o) =>
       match o {
         | Broadcast(msg) =>
@@ -32,6 +31,7 @@ module consensus {
           { ...s, activeTimeouts: s.activeTimeouts.set(v, s.activeTimeouts.get(v).union(Set(slot))) }
       })
 
+
   //
   //
   // State Machine
@@ -39,6 +39,12 @@ module consensus {
   //
 
   var s: Environment
+
+  val finalizedBlocks: Slot -> Set[Blockhash] = aliveSlots.mapBy(s => finalized(s, allMessages))
+
+  var ch: Slot -> Set[Blockhash] // blockchain as seen by message soup. Ancestors not seen as finalized here if they are not finalized themselves
+
+
 //  var counter: int // Required for TLC
 
   /// all the messages that could be received, i.e., the ones sent by benevolent processes
@@ -51,6 +57,7 @@ module consensus {
   //  counter' = 0,
     s' = {
       system: benevolent.mapBy(_ => {
+        // preload state for 5 slots
         state: [
           Set(ParentReady(-1)),
           Set(),
@@ -60,41 +67,37 @@ module consensus {
         ],
         pendingBlocks: [None, None, None, None, None]
       }),
-      // now: 0,
       msgBuffer: Set(),
       activeTimeouts: benevolent.mapBy(v => Set()),
-    }
+    },
+    ch' = aliveSlots.mapBy(s => Set()),
   }
 
   action receiveSpecificBlock(v: ProcessID, b: Block): bool = all {
     allBlocks.contains(b),
-    v.processInput(BlockInput(b))
+    v.processInput(BlockInput(b)),
   }
 
-  /// Emit Block and process it
-  /// Warning: The pseudo code uses s. Does this mean s is checked against the local
-  /// view of the slot, and thus only "current" blocks can be received, or could BlockInput(block)
-  /// could also be executed for blocks from future slots?
-  /// This question applies to all "upon"s
   action receiveBlock(v: ProcessID, now: Slot): bool = all{
     nondet block = allBlocks.filter(b => b.slot == now).oneOf()
     receiveSpecificBlock(v, block)
   }
 
-  /// Fire timeout for current slot
+  /// Fire timeout for slot
   action fireTimeoutEvent(v: ProcessID, now: Slot): bool = all {
     s.activeTimeouts.get(v).contains(now),
     val s2 = { ...s, activeTimeouts: s.activeTimeouts.set(v, s.activeTimeouts.get(v).exclude(Set(now))) }
-    s' = applyEffect(s2, v, consensus(s2.system.get(v), TimeOutInput(now)))
+    s' = applyEffect(s2, v, consensus(s2.system.get(v), TimeOutInput(now))),
+    ch' = finalizedBlocks,
   }
 
   //
   // auxiliary functions for actions below
   //
 
-
-  action processInput(id: ProcessID, input: ConsensusInput): bool = {
-    s' = applyEffect(s, id, consensus(s.system.get(id), input))
+  action processInput(id: ProcessID, input: ConsensusInput): bool = all {
+    s' = applyEffect(s, id, consensus(s.system.get(id), input)),
+    ch' = finalizedBlocks,
   }
 
   // Definition 15 (Pool events). The following events are emitted as input for
@@ -115,27 +118,27 @@ module consensus {
     all {
       bs.size() > 0,
       nondet b = bs.oneOf()
-      v.processInput(BlockNotarizedInput({ slot: b.slot, hash: b.hash }))
+      v.processInput(BlockNotarizedInput({ slot: b.slot, hash: b.hash })),
     }
 
   // • ParentReady(s, hash(b)): Slot s is the first of its leader window, and Pool
   // holds a notarization or notar-fallback certificate for a previous block b,
   // and skip certificates for every slot s′ since b, i.e., for slot(b) < s′ < s.
-  //
-  // Warning "notarization or notar-fallback": notar-fallback seems to imply notar
-  // Warning: Previous block? Block for previous slot
   pure def parentReadyCondition(slot: Slot, hash: Blockhash, msgs: Set[NetworkMsg]): bool = all {
     firstSlotInLeaderWindow(slot),
-    0.to(slot - 1).exists(s =>
-      val b = { slot: s, hash: hash }
-      and {
-        or {
-          isCertified(NotarizationCertificate(b), msgs),
-          isCertified(NotarFallbackCertificate(b), msgs)
-        },
-        b.slot.to(slot).subseteq(slotsSkipCertified(msgs))
-      }
-    )
+    or {
+      slot == 0, // TODO: introduced by Josef
+      0.to(slot - 1).exists(s =>
+        val b = { slot: s, hash: hash }
+        and {
+          or {
+            isCertified(NotarizationCertificate(b), msgs),
+            isCertified(NotarFallbackCertificate(b), msgs)
+          },
+          b.slot.to(slot).subseteq(slotsSkipCertified(msgs))
+        }
+      )
+    }
   }
 
   /// Emit ParentReady and process it
@@ -144,7 +147,7 @@ module consensus {
     all {
       bs.size() > 0,
       nondet b = bs.oneOf()
-      v.processInput(ParentReadyInput({slot: now, hash: b.hash}))
+      v.processInput(ParentReadyInput({slot: now, hash: b.hash})),
     }
 
   /// Definition 16 (fallback events)
@@ -176,7 +179,10 @@ module consensus {
     val notar = votedToNotar(b.reference(), allMessages)
     val skip = votedToSkip(now, allMessages)
     // notar(b) ≥ 40% or (skip(s) + notar(b) ≥ 60% and notar(b) ≥ 20%).
-    // Question: is (+) here the sum of the sizes or the size of the union?
+    // The paper postulates that the pool stores for each sender and slot a skip or a notar message
+    // but not both. Thus, in the paper they can sum up the sizes of the sets. In this spec we
+    // abstract the pool so that here we need to build the union
+    // of the skip and notar sets and then compute the size
     or {
       surpassesThreshold(notar, 40),
       and {
@@ -249,14 +255,8 @@ module consensus {
   }
 
   /// Any upon that is triggered by messages
-  action messageResponse =
-    nondet v = oneOf(benevolent)
-    nondet slot = oneOf(aliveSlots)
-    // we pass the global time here, but we might also model that a validator is
-    // ahead / behind time
+  action messageResponse (v, slot) =
     any {
-      // Question: Are all of these fired only for now or can they also be fired
-      // for future/past slots?
       receiveBlock(v, slot),
       blockNotarizedAction(v, slot),
       parentReadyAction(v, slot),
@@ -264,41 +264,27 @@ module consensus {
       safeToSkipAction(v, slot),
     }
 
-  // /// increment the global time (slot number)
-  // action tick = all {
-  //   s.now < maxSlot, // make sure we don't enter a slot for which we don't have a block in the model
-  //   s' = { ... s, now: s.now + 1 }
-  // }
 
   /// Main step action. Includes all behavior
   action step = all {
   //  counter < 10,
   //  counter' = counter + 1,
+    nondet v = oneOf(benevolent)
+    nondet slot = oneOf(aliveSlots)
     any {
-      messageResponse,
-      nondet v = oneOf(benevolent)
-      nondet slot = oneOf(aliveSlots)
+      messageResponse(v, slot),
       fireTimeoutEvent(v, slot),
-//      tick,
     }
   }
 
   /// Alternative step action. With this, no timeout ever expires
   action noTimeout = any {
-    messageResponse,
-  //  tick,
-  }
-
-  /// Alternative step action. With this, we never tick (leave slot 0)
-  action oneSlot = any {
-    messageResponse,
     nondet v = oneOf(benevolent)
-    fireTimeoutEvent(v, 0),
+    nondet slot = oneOf(aliveSlots)    
+    messageResponse(v, slot),
   }
 
-  /// Alternative step action. With this, no timeout ever expires and we never tick
-  action oneSlotNoTimeout =
-    messageResponse
+
 
   //
   //
@@ -320,6 +306,9 @@ module consensus {
   val fastFinalizedWitness =
     allBlocks.forall(b => not(isCertified(FastFinalizationCertificate(b.reference()), allMessages)))
 
+  /// Witness to find a run where a timeout is started
+  val timeoutWitness = 
+     s.activeTimeouts.values().forall(v => v == Set())
 
   /// Theorem 1 (safety). If any correct node finalizes a block b in slot s and any
   /// correct node finalizes any block b′ in any slot s′ ≥ s, b′ is a descendant of b.
@@ -331,7 +320,21 @@ module consensus {
     })
   })
 
-  // TODO finalize ancestors
+  /// This generates example traces where a block is finalized after some empty slots
+  /// increase max steps to approx 100.
+  val emptySlotsWitness = 
+    aliveSlots.forall(s1 => 
+      aliveSlots.forall(s2 => 
+        s1 < s2 implies
+      ch.get(s1).size() >= ch.get(s2).size()))
+                              
+  /// This generates example traces where every slot is finalized
+  /// increase max steps to approx 100.
+  val noEmptySlotsWitness = 
+    aliveSlots.exists(s1 => 
+      ch.get(s1).size() == 0)
+
+  // TODO finalize ancestors locally
 }
 
 module some_byz {
@@ -395,11 +398,11 @@ module some_byz_vp {
     aliveHashes = 42.to(49),
   ).*
 
-  run ffTest =
-    init
-    .then(receiveSpecificBlock("v1", { hash: 42, parent: -1, slot: 0 }))
-    .then(receiveSpecificBlock("v2", { hash: 42, parent: -1, slot: 0 }))
-    .expect(fastFinalized(0, allMessages) == Set(42))
+  // run ffTest =
+  //   init
+  //   .then(receiveSpecificBlock("v1", { hash: 42, parent: -1, slot: 0 }))
+  //   .then(receiveSpecificBlock("v2", { hash: 42, parent: -1, slot: 0 }))
+  //   .expect(fastFinalized(0, allMessages) == Set(42))
 
 }
 

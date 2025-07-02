@@ -131,12 +131,12 @@ module alpenglow {
   // Assumption 1 and Assumption 2
   assume resilienceCondition = all {
     totalVotingPower > byzantine.voting_power() * 5, // N > 5F
-    totalVotingPower > good.voting_power() * 5,
+    totalVotingPower > good.voting_power() * 5, // Less than a fifth is not Byzantine but may be silent
   }
 
   /// Checks for thresholds, using the known total voting power
   pure def surpassesThreshold(votes, threshold) =
-    votes.voting_power() * 100 >= totalVotingPower* threshold
+    votes.voting_power() * 100 >= totalVotingPower * threshold
 
   /// All votes that can be sent by the Byzantine processes (without senders)
   pure val byzMessages = tuples(aliveSlots, aliveHashes).map(((slot, hash)) =>
@@ -302,7 +302,6 @@ module alpenglow {
       val firstSlot = firstSlotInLeaderWindow(b.slot)
       if ((firstSlot and ParentReady(b.parent).in(ls.state[b.slot]))
         or (not(firstSlot) and VotedNotar(b.parent).in(ls.state[b.slot - 1])))
-        // Warning: parentheses not matching in paper
 
         // Notarization vote
         val out = Set(Broadcast(NotarVoteMsg({ slot:b.slot, hash: b.hash })))
@@ -357,7 +356,6 @@ module alpenglow {
 
 
   /// Algorithm 1: each upon corresponds to one consensus input
-  // Warning: Block vs. Blockevent a bit unclear
   pure def consensus(ls: LocalState, input: ConsensusInput): Result =
     match input {
       | BlockInput(b) =>
@@ -371,7 +369,7 @@ module alpenglow {
           { output: tn.result.output, post: tn.result.post.setPendingBlock(b.slot, Some(b)) }
         else
           // Even if all if conditions evaluate to false, tryNotar may have side effects and may change the local state
-          { output: tn.result.output, post: tn.result.post } // Warning: The state might have changed
+          { output: tn.result.output, post: tn.result.post } // The state might have changed although all if conditions evaluate to false
 
       | TimeOutInput(slot) =>
         if (not(Voted.in(ls.state[slot])))
@@ -389,7 +387,7 @@ module alpenglow {
         val s2 = checkPendingBlocks(s1)
         // Start time for all slots in this window
         val s3 = setTimeouts(s2.post, sh.slot)
-        { output: s2.output.union(s3.output), post: s2.post }
+        { output: s2.output.union(s3.output), post: s3.post } // TODO
 
       | SafeToNotarInput(sh) =>
         val s1 = trySkipWindow(ls, sh.slot)
