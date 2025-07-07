@@ -461,8 +461,8 @@ module too_many_byz {
     .then(blockNotarizedAction("v3", 0))
     .then(blockNotarizedAction("v4", 0)) 
     .expect(
-        Set(  { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v3" },
-              { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v4" })
+        Set(  { msg: FinalVoteMsg(0), sender: "v3" },
+              { msg: FinalVoteMsg(0), sender: "v4" })
         .subseteq(s.msgBuffer))
     .then(receiveSpecificBlock("v1", { hash: 42, parent: -1, slot: 0 }))    
     .expect(not(agreement))
