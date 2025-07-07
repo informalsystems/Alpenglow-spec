@@ -45,7 +45,7 @@ module consensus {
   var ch: Slot -> Set[Blockhash] // blockchain as seen by message soup. Ancestors not seen as finalized here if they are not finalized themselves
 
 
-//  var counter: int // Required for TLC
+  var counter: int // Required for TLC
 
   /// all the messages that could be received, i.e., the ones sent by benevolent processes
   /// and the ones that byzantine processes may send. We use this in the actions to allow
@@ -54,7 +54,6 @@ module consensus {
   val allMessages = s.msgBuffer.union(byzNetworkMsgs)
 
   action init = all {
-  //  counter' = 0,
     s' = {
       system: benevolent.mapBy(_ => {
         // preload state for 5 slots
@@ -68,9 +67,10 @@ module consensus {
         pendingBlocks: [None, None, None, None, None]
       }),
       msgBuffer: Set(),
-      activeTimeouts: benevolent.mapBy(v => Set()),
+      activeTimeouts: benevolent.mapBy(v => Set(0)),
     },
     ch' = aliveSlots.mapBy(s => Set()),
+    counter' = 0,
   }
 
   action receiveSpecificBlock(v: ProcessID, b: Block): bool = all {
@@ -89,6 +89,7 @@ module consensus {
     val s2 = { ...s, activeTimeouts: s.activeTimeouts.set(v, s.activeTimeouts.get(v).exclude(Set(now))) }
     s' = applyEffect(s2, v, consensus(s2.system.get(v), TimeOutInput(now))),
     ch' = finalizedBlocks,
+    counter' = counter + 1,
   }
 
   //
@@ -98,6 +99,7 @@ module consensus {
   action processInput(id: ProcessID, input: ConsensusInput): bool = all {
     s' = applyEffect(s, id, consensus(s.system.get(id), input)),
     ch' = finalizedBlocks,
+    counter' = counter + 1,
   }
 
   // Definition 15 (Pool events). The following events are emitted as input for
@@ -267,8 +269,7 @@ module consensus {
 
   /// Main step action. Includes all behavior
   action step = all {
-  //  counter < 10,
-  //  counter' = counter + 1,
+    counter < 10,
     nondet v = oneOf(benevolent)
     nondet slot = oneOf(aliveSlots)
     any {
@@ -448,4 +449,22 @@ module too_many_byz {
     aliveSlots = Set(0),
     aliveHashes = 41.to(42),
   ).*
+
+  run disagreement_example_Test =
+    init
+    .then(receiveSpecificBlock("v3", { hash: 41, parent: -1, slot: 0 }))
+    .then(receiveSpecificBlock("v4", { hash: 41, parent: -1, slot: 0 }))
+    .expect(s.msgBuffer == 
+      Set(  { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v3" },
+            { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v4" }))
+    .then(receiveSpecificBlock("v2", { hash: 42, parent: -1, slot: 0 }))
+    .then(blockNotarizedAction("v3", 0))
+    .then(blockNotarizedAction("v4", 0)) 
+    .expect(
+        Set(  { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v3" },
+              { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v4" })
+        .subseteq(s.msgBuffer))
+    .then(receiveSpecificBlock("v1", { hash: 42, parent: -1, slot: 0 }))    
+    .expect(not(agreement))
+
 }
