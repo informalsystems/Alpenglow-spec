@@ -466,5 +466,20 @@ module too_many_byz {
         .subseteq(s.msgBuffer))
     .then(receiveSpecificBlock("v1", { hash: 42, parent: -1, slot: 0 }))    
     .expect(not(agreement))
+    .expect(
+      Set(  { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v3" },
+            { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v4" },
+            { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "b1" },
+            { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "b2" }, 
+            { msg: NotarVoteMsg({ hash: 42, slot: 0 }), sender: "v1" },
+            { msg: NotarVoteMsg({ hash: 42, slot: 0 }), sender: "v2" },
+            { msg: NotarVoteMsg({ hash: 42, slot: 0 }), sender: "b1" },
+            { msg: NotarVoteMsg({ hash: 42, slot: 0 }), sender: "b2" },
+            { msg: FinalVoteMsg(0), sender: "v3" },
+            { msg: FinalVoteMsg(0), sender: "v4" },
+            { msg: FinalVoteMsg(0), sender: "b1" },
+            { msg: FinalVoteMsg(0), sender: "b2" })
+      .subseteq(allMessages))
+  
 
 }
