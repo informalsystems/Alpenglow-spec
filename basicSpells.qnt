@@ -81,18 +81,18 @@ module basicSpells {
     assert(abs(0) == 0),
   }
 
-  /// Renext a set element.
+  /// Remove a set element.
   ///
-  /// - @param s a set to renext an element from
-  /// - @param elem an element to renext
+  /// - @param s a set to remove an element from
+  /// - @param elem an element to remove
   /// - @returns a new set that contains all elements of set but elem
-  pure def setRenext(s: Set[a], elem: a): Set[a] = {
+  pure def setRemove(s: Set[a], elem: a): Set[a] = {
     s.exclude(Set(elem))
   }
 
-  run setRenextTest = all {
-    assert(Set(2, 4) == Set(2, 3, 4).setRenext(3)),
-    assert(Set() == Set().setRenext(3)),
+  run setRemoveTest = all {
+    assert(Set(2, 4) == Set(2, 3, 4).setRemove(3)),
+    assert(Set() == Set().setRemove(3)),
   }
 
   /// Adds an element to a set.
@@ -144,36 +144,36 @@ module basicSpells {
     assert(Map(2 -> 3, 4 -> 5).getOrElse(7, 11) == 11),
   }
 
-  /// Renext a map entry.
+  /// Remove a map entry.
   ///
-  /// - @param m a map to renext an entry from
-  /// - @param key the key of an entry to renext
+  /// - @param m a map to remove an entry from
+  /// - @param key the key of an entry to remove
   /// - @returns a new map that contains all entries of map
   ///          that do not have the key key
-  pure def mapRenext(m: a -> b, key: a): a -> b = {
-    m.keys().setRenext(key).mapBy(k => m.get(k))
+  pure def mapRemove(m: a -> b, key: a): a -> b = {
+    m.keys().setRemove(key).mapBy(k => m.get(k))
   }
 
-  run mapRenextTest = all {
-    assert(Map(3 -> 4, 7 -> 8) == Map(3 -> 4, 5 -> 6, 7 -> 8).mapRenext(5)),
-    assert(Map() == Map().mapRenext(3)),
+  run mapRemoveTest = all {
+    assert(Map(3 -> 4, 7 -> 8) == Map(3 -> 4, 5 -> 6, 7 -> 8).mapRemove(5)),
+    assert(Map() == Map().mapRemove(3)),
   }
 
-  /// Renexts a set of map entries.
+  /// Removes a set of map entries.
   ///
-  /// - @param m a map to renext entries from
-  /// - @param ks a set of keys for entries to renext from the map
+  /// - @param m a map to remove entries from
+  /// - @param ks a set of keys for entries to remove from the map
   /// - @returns a new map that contains all entries of map
   ///          that do not have a key in keys
-  pure def mapRenextAll(m: a -> b, ks: Set[a]): a -> b = {
+  pure def mapRemoveAll(m: a -> b, ks: Set[a]): a -> b = {
       m.keys().exclude(ks).mapBy(k => m.get(k))
   }
 
-  run mapRenextAllTest =
+  run mapRemoveAllTest =
       val m = Map(3 -> 4, 5 -> 6, 7 -> 8)
       all {
-          assert(m.mapRenextAll(Set(5, 7)) == Map(3 -> 4)),
-          assert(m.mapRenextAll(Set(5, 99999)) == Map(3 -> 4, 7 -> 8)),
+          assert(m.mapRemoveAll(Set(5, 7)) == Map(3 -> 4)),
+          assert(m.mapRemoveAll(Set(5, 99999)) == Map(3 -> 4, 7 -> 8)),
       }
 
   /// Get the set of values of a map.
