@@ -126,30 +126,27 @@ module consensus {
   // • ParentReady(s, hash(b)): Slot s is the first of its leader window, and Pool
   // holds a notarization or notar-fallback certificate for a previous block b,
   // and skip certificates for every slot s′ since b, i.e., for slot(b) < s′ < s.
-  pure def parentReadyCondition(slot: Slot, hash: Blockhash, msgs: Set[NetworkMsg]): bool = all {
-    firstSlotInLeaderWindow(slot),
-    or {
-      slot == 0, // TODO: introduced by Josef
-      0.to(slot - 1).exists(s =>
-        val b = { slot: s, hash: hash }
-        and {
-          or {
-            isCertified(NotarizationCertificate(b), msgs),
-            isCertified(NotarFallbackCertificate(b), msgs)
-          },
-          b.slot.to(slot).subseteq(slotsSkipCertified(msgs))
-        }
-      )
-    }
+  pure def parentReadyBlocks(slot: Slot, msgs: Set[NetworkMsg]): Set[Block] = {
+    if (not(firstSlotInLeaderWindow(slot))) Set() else
+    allBlocks.filter(b =>
+      and {
+        b.slot < slot,
+        or {
+          isCertified(NotarizationCertificate(b.reference()), msgs),
+          isCertified(NotarFallbackCertificate(b.reference()), msgs)
+        },
+        b.slot.to(slot).subseteq(slotsSkipCertified(msgs))
+      }
+    )
   }
 
   /// Emit ParentReady and process it
   action parentReadyAction(v: ProcessID, now: Slot): bool =
-    val bs = allBlocks.filter(b => parentReadyCondition(now, b.hash, allMessages))
+    val bs = parentReadyBlocks(now, allMessages)
     all {
       bs.size() > 0,
       nondet b = bs.oneOf()
-      v.processInput(ParentReadyInput({slot: now, hash: b.hash})),
+      v.processInput(ParentReadyInput(b.reference())),
     }
 
   /// Definition 16 (fallback events)
