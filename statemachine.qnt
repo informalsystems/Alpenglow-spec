@@ -447,7 +447,7 @@ module too_many_byz {
     aliveHashes = 41.to(42),
   ).*
 
-  run disagreement_example_Test =
+  run disagreementExampleTest =
     init
     .then(receiveSpecificBlock("v3", { hash: 41, parent: -1, slot: 0 }))
     .then(receiveSpecificBlock("v4", { hash: 41, parent: -1, slot: 0 }))
