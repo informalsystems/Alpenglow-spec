@@ -1,5 +1,3 @@
-// -*- mode: Bluespec; -*-
-
 module lemmas {
   import basicSpells.* from "./basicSpells"
   import alpenglow.* from "./alpenglow"

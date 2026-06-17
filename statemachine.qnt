@@ -1,5 +1,3 @@
-// -*- mode: Bluespec; -*-
-
 module consensus {
   import basicSpells.* from "./basicSpells"
   import alpenglow.* from "./alpenglow"
